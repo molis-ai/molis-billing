@@ -148,7 +148,11 @@ test('A03 first month is atomic with payment and concurrent turnover has one gra
     startsAt: first,
     expiresAt: next,
   })
-  assert.equal((await balance(first)).data.available, 500)
+  const initialBalance = (await balance(first)).data
+  assert.equal(initialBalance.available, 500)
+  assert.equal(initialBalance.granted, 500)
+  assert.equal(initialBalance.reserved, 0)
+  assert.equal(initialBalance.consumed, 0)
   assert.equal(
     (
       await call(
@@ -160,6 +164,11 @@ test('A03 first month is atomic with payment and concurrent turnover has one gra
     ).status,
     201,
   )
+  const heldBalance = (await balance(first + 2)).data
+  assert.equal(heldBalance.available, 480)
+  assert.equal(heldBalance.granted, 500)
+  assert.equal(heldBalance.reserved, 20)
+  assert.equal(heldBalance.consumed, 0)
   const concurrent = await Promise.all([
     ...Array.from({ length: 8 }, () => balance(next)),
     ...Array.from({ length: 2 }, () => call(cleanup, next)),

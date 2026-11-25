@@ -18,8 +18,10 @@ pub(super) struct CreditPeriod {
     pub id: String,
     pub starts_at: i64,
     pub expires_at: i64,
+    pub granted: i64,
     pub available: i64,
     pub reserved: i64,
+    pub consumed: i64,
     pub version: i64,
     pub status: String,
 }
@@ -273,7 +275,7 @@ pub(super) async fn period_at(
     values.extend([number(at), number(at)]);
     bind(
         db,
-        "SELECT id, starts_at, expires_at, available, reserved, version, status
+        "SELECT id, starts_at, expires_at, granted, available, reserved, consumed, version, status
           FROM billing_credit_period WHERE product=? AND owner_kind=? AND owner_id=?
             AND starts_at<=? AND expires_at>? AND status IN ('ACTIVE','EXPIRED')
           ORDER BY starts_at DESC, id DESC LIMIT 1",
@@ -294,7 +296,7 @@ async fn archive_due(
     values.push(number(now));
     let rows: Vec<CreditPeriod> = bind(
         db,
-        "SELECT id, starts_at, expires_at, available, reserved, version, status
+        "SELECT id, starts_at, expires_at, granted, available, reserved, consumed, version, status
          FROM billing_credit_period
          WHERE product=? AND owner_kind=? AND owner_id=? AND status='ACTIVE' AND expires_at<=?
          ORDER BY expires_at, id",
@@ -314,7 +316,7 @@ async fn archive_due(
                     cleanup::release_due_holds(db, scope, now, request_id).await?;
                     let updated: Option<CreditPeriod> = bind(
                         db,
-                        "SELECT id, starts_at, expires_at, available, reserved, version, status
+                        "SELECT id, starts_at, expires_at, granted, available, reserved, consumed, version, status
                          FROM billing_credit_period WHERE id=? AND status='ACTIVE'",
                         &[row.id.as_str().into()],
                     )?

@@ -142,6 +142,9 @@ async fn handle_user_at(
             json!({
                 "product": scope.product, "ownerKind": scope.owner.kind, "ownerId": scope.owner.id,
                 "available": period.as_ref().map_or(0, |row| row.available),
+                "granted": period.as_ref().map_or(0, |row| row.granted),
+                "reserved": period.as_ref().map_or(0, |row| row.reserved),
+                "consumed": period.as_ref().map_or(0, |row| row.consumed),
                 "currentCreditPeriod": period.map(|row| json!({
                     "startsAt": row.starts_at, "expiresAt": row.expires_at
                 })),
