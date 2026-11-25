@@ -12,7 +12,7 @@ npm --prefix worker run db:migrate
 npm run dev
 ```
 
-`npm start -- --env dev` is equivalent. The Worker listens on `127.0.0.1:8788`. The bootstrap migration uses the same local D1 state as the development server and contains a single `SELECT 1` statement.
+`npm start -- --env dev` is equivalent. The Worker listens on `127.0.0.1:8788`. The local migration command uses the development server's D1 state and seeds two Work test plans: personal (CNY 10/month or 100/year, 100 credits/month) and team (CNY 30/month or 300/year, 500 credits/month). Running it again preserves existing plan versions. The test data lives outside the shared migrations.
 
 ```sh
 curl -i http://127.0.0.1:8788/api/v1/health
