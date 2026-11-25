@@ -1,0 +1,20 @@
+{
+  "name": "@molis/billing-cloudflare",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "setup": "npm --prefix worker ci && npm --prefix worker run setup:rust",
+    "dev": "node worker/scripts/environment-command.mjs start",
+    "start": "node worker/scripts/environment-command.mjs start",
+    "deploy": "node worker/scripts/environment-command.mjs deploy",
+    "check": "npm --prefix worker run check && npm --prefix worker test",
+    "test": "node --test scripts/environment-properties.test.mjs && npm run check",
+    "build": "npm --prefix worker run build",
+    "clippy": "npm --prefix worker run clippy",
+    "format": "npm --prefix worker run format",
+    "format:check": "npm --prefix worker run format:check"
+  }
+}

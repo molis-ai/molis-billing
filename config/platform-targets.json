@@ -1,0 +1,23 @@
+{
+  "dev": {
+    "workerName": "molis-billing-local",
+    "databaseName": "molis-billing-local",
+    "billingOrigin": "http://127.0.0.1:8788",
+    "authOrigin": "http://127.0.0.1:8787",
+    "environmentId": "billing-local"
+  },
+  "test": {
+    "workerName": "molis-billing-test",
+    "databaseName": "molis-billing-test",
+    "billingOrigin": "https://billing.test.molis.ai",
+    "authOrigin": "https://auth.test.molis.ai",
+    "environmentId": "billing-test"
+  },
+  "prod": {
+    "workerName": "molis-billing-production",
+    "databaseName": "molis-billing-prod",
+    "billingOrigin": "https://billing.molis.ai",
+    "authOrigin": "https://auth.molis.ai",
+    "environmentId": "billing-production"
+  }
+}

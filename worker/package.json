@@ -1,0 +1,25 @@
+{
+  "name": "@molis/billing-worker",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "setup:rust": "node scripts/rust-setup.mjs",
+    "build:rust": "node scripts/rust-build.mjs",
+    "check": "node scripts/rust-check.mjs check",
+    "clippy": "node scripts/rust-check.mjs clippy",
+    "test": "node scripts/rust-check.mjs test && npm run build:rust && node --test tests/*.test.ts",
+    "build": "wrangler deploy --dry-run --config wrangler.fixture.jsonc",
+    "db:migrate": "wrangler d1 migrations apply molis-billing-local --local --config wrangler.fixture.jsonc --persist-to .wrangler/state",
+    "format": "node scripts/rust-check.mjs format && prettier --config .prettierrc.json --write ../package.json ../config/platform-targets.json ../scripts scripts tests package.json wrangler.fixture.jsonc",
+    "format:check": "node scripts/rust-check.mjs format:check && prettier --config .prettierrc.json --check ../package.json ../config/platform-targets.json ../scripts scripts tests package.json wrangler.fixture.jsonc"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261119.1",
+    "miniflare": "5.20261119.0-beta",
+    "prettier": "3.6.2",
+    "wrangler": "4.166.0"
+  }
+}

@@ -1,0 +1,53 @@
+name: Development checks
+
+on:
+  push:
+    branches: [main, "codex/**"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: development-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Billing build and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      WRANGLER_SEND_METRICS: "false"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.22.1
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+      - name: Install pinned dependencies and Rust tools
+        run: npm run setup
+      - name: Check formatting
+        run: npm run format:check
+      - name: Run Clippy for the WASM target
+        run: npm run clippy
+      - name: Build the locked wasm-bindgen CLI
+        run: |
+          version=$(awk -F '"' '/^name = "wasm-bindgen"$/ { getline; print $2; exit }' worker/rust/Cargo.lock)
+          test -n "$version"
+          toolchain=$(node --input-type=module -e "import { installedToolchain } from './worker/scripts/rust-toolchain.mjs'; process.stdout.write(installedToolchain())")
+          rustup run "$toolchain" cargo install --locked --version "=$version" --root "$RUNNER_TEMP/billing-wasm-tools" wasm-bindgen-cli
+          echo "WASM_BINDGEN_BIN=$RUNNER_TEMP/billing-wasm-tools/bin/wasm-bindgen" >> "$GITHUB_ENV"
+      - name: Run configuration, Rust and Worker tests
+        run: npm test
+      - name: Check Wrangler packages for all environments
+        run: |
+          npm run build
+          for environment in dev test prod; do
+            npm run deploy -- --env "$environment" --dry-run
+          done
