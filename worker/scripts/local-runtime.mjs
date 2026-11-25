@@ -5,7 +5,12 @@ import { compatibilityDate } from './environment.mjs'
 const rustDirectory = new URL('../rust/', import.meta.url)
 const rustPath = (relative) => fileURLToPath(new URL(relative, rustDirectory))
 
-export function startLocalRuntime({ database = true, bindings = {}, auth } = {}) {
+export function startLocalRuntime({
+  database = true,
+  bindings = {},
+  auth,
+  triggerHandlers = false,
+} = {}) {
   return new Miniflare(
     convertV4MiniflareOptions({
       workers: [
@@ -31,6 +36,7 @@ export function startLocalRuntime({ database = true, bindings = {}, auth } = {})
         },
       ],
       d1Persist: false,
+      unsafeTriggerHandlers: triggerHandlers,
     }),
   )
 }

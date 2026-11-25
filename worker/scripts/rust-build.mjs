@@ -13,9 +13,14 @@ const binary = join(
 )
 if (!existsSync(binary)) throw new Error('Run npm run setup to install worker-build.')
 const args = process.argv.slice(2)
-if (args.length > 1 || (args.length === 1 && args[0] !== '--production'))
-  throw new Error('Use --production to compile without default features.')
-const cargoArgs = args.length ? ['--locked', '--no-default-features'] : ['--locked']
+const cargoArgs = ['--locked']
+if (args.length === 1 && args[0] === '--production') {
+  cargoArgs.push('--no-default-features')
+} else if (args.length === 1 && args[0] === '--credit-fixture') {
+  cargoArgs.push('--features', 'credit-fixture')
+} else if (args.length) {
+  throw new Error('Use --production for deployment or --credit-fixture for local acceptance.')
+}
 execFileSync(binary, ['--release', '--no-opt', '.', ...cargoArgs], {
   cwd,
   env: rustEnvironment(),

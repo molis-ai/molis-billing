@@ -33,6 +33,7 @@ export function billingEnvironment(name, dryRun) {
     compatibility_date: compatibilityDate,
     workers_dev: false,
     preview_urls: false,
+    triggers: { crons: ['*/5 * * * *'] },
     ...(name === 'dev'
       ? {}
       : {

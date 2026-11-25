@@ -64,7 +64,11 @@ pub fn request_id(request: &Request) -> String {
         .ok()
         .flatten()
         .filter(|value| valid_id(value))
-        .unwrap_or_else(new_request_id)
+        .unwrap_or_else(generated_id)
+}
+
+pub fn generated_id() -> String {
+    new_request_id()
 }
 
 pub fn valid_id(value: &str) -> bool {
