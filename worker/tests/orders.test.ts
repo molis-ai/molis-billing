@@ -6,6 +6,7 @@ import { applySchema, seedPlans } from './d1-fixture.ts'
 
 const origin = 'https://billing.internal'
 const base = '/api/v1'
+const auditPath = '/internal/v1/audit-events'
 const personal = 'work-personal-test'
 const team = 'work-team-test'
 const windowMs = 1_800_000
@@ -33,6 +34,8 @@ type Order = {
 async function setup(t: TestContext, environment = 'test', withWebhookSecret = true) {
   const internal = randomBytes(32).toString('base64url')
   const signing = randomBytes(32).toString('base64url')
+  let auditPermission = true
+  const auditChecks: (string | null)[] = []
   const runtime = startLocalRuntime({
     bindings: {
       MOLIS_ENVIRONMENT: environment,
@@ -41,11 +44,26 @@ async function setup(t: TestContext, environment = 'test', withWebhookSecret = t
       ...(withWebhookSecret && { MOLIS_MOCK_WEBHOOK_SECRET: signing }),
     },
     auth: async (request: Request) => {
+      const url = new URL(request.url)
+      assert.equal(url.origin, 'https://auth.internal')
+      assert.equal(request.method, 'POST')
       assert.equal(request.headers.get('X-Molis-Internal-Secret'), internal)
       const actor = request.headers.get('Authorization')?.replace('Bearer ', '')
       if (actor === 'expired')
         return Response.json({ error: { code: 'SESSION_EXPIRED' } }, { status: 401 })
       if (actor === 'left') return Response.json({ error: { code: 'FORBIDDEN' } }, { status: 403 })
+      if (url.pathname === '/internal/v1/platform/audit/authorize') {
+        auditChecks.push(request.headers.get('X-Request-Id'))
+        assert.deepEqual(await request.json(), {})
+        assert.equal(request.headers.has('Cookie'), false)
+        if (actor === 'bridge-missing')
+          return Response.json({ error: { code: 'NOT_FOUND' } }, { status: 404 })
+        if (actor === 'session-only') return Response.json({ data: { userId: actor } })
+        if (actor !== 'platform-auditor' || !auditPermission)
+          return Response.json({ error: { code: 'FORBIDDEN' } }, { status: 403 })
+        return Response.json({ data: { userId: actor, permission: 'AUDIT_READ' } })
+      }
+      assert.equal(url.pathname, '/internal/v1/subjects/verify')
       const { product, owner } = await request.json()
       return Response.json({
         data: {
@@ -143,7 +161,23 @@ async function setup(t: TestContext, environment = 'test', withWebhookSecret = t
   }
 
   const count = (table: string) => db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).first('n')
-  return { call, create, pay, refund, event, notify, sweep, count, db }
+  const internalHeaders = { 'X-Molis-Internal-Secret': internal }
+  return {
+    call,
+    create,
+    pay,
+    refund,
+    event,
+    notify,
+    sweep,
+    count,
+    db,
+    caller,
+    runtime,
+    internalHeaders,
+    auditChecks,
+    revokeAuditPermission: () => (auditPermission = false),
+  }
 }
 
 async function data(response: Response | Promise<Response>, status = 200) {
@@ -179,6 +213,141 @@ if (process.env.BILLING_ORDER_TEST_NO_MOCK === '1') {
     assert.equal(await f.count('billing_order'), 1)
   })
 } else {
+  test('platform audit pages real payment, refund and Credit writes with fresh permission checks', async (t) => {
+    const f = await setup(t)
+    const now = at('2027-06-12T07:30:00Z')
+    const tenant = 'team-fixture'
+    const first = await data(f.create({ now }), 201)
+    await data(f.pay(first, { now, requestId: 'audit-payment' }))
+    const group = await data(f.create({ now, tenant }), 201)
+    await data(f.pay(group, { now, tenant }))
+    const renewal = await data(f.create({ now, tenant }, 'YEAR'), 201)
+    await data(f.pay(renewal, { now, tenant }))
+    await data(f.refund(renewal, { now, tenant, requestId: 'audit-refund' }))
+    await data(
+      f.caller.fetch(origin + '/internal/v1/credits/consume', {
+        method: 'POST',
+        headers: {
+          ...f.internalHeaders,
+          'Content-Type': 'application/json',
+          'Idempotency-Key': 'audit-usage',
+          'X-Fixture-Now': String(now),
+          'X-Request-Id': 'audit-usage',
+        },
+        body: JSON.stringify({
+          callingService: 'work-fixture',
+          actorUserId: 'user-fixture',
+          product: 'WORK',
+          owner: { kind: 'USER', id: 'user-fixture' },
+          referenceId: 'audit-usage',
+          occurredAt: now,
+          amount: 3,
+        }),
+      }),
+    )
+
+    const headers = {
+      ...f.internalHeaders,
+      Authorization: 'Bearer platform-auditor',
+      'X-Request-Id': 'audit-reader',
+    }
+    const call = (query = '', overrides = {}) =>
+      f.caller.fetch(origin + auditPath + query, { headers: { ...headers, ...overrides } })
+
+    await error(f.runtime.dispatchFetch(origin + auditPath, { headers }), 404, 'NOT_FOUND')
+    await error(f.caller.fetch(origin + auditPath, { method: 'POST', headers }), 404, 'NOT_FOUND')
+    await error(
+      f.caller.fetch(origin + auditPath, { headers: f.internalHeaders }),
+      401,
+      'UNAUTHENTICATED',
+    )
+    await error(call('', { 'X-Molis-Internal-Secret': 'x'.repeat(43) }), 404, 'NOT_FOUND')
+    assert.deepEqual(f.auditChecks, [])
+    for (const [actor, status, code] of [
+      ['admin-1', 403, 'FORBIDDEN'],
+      ['member', 403, 'FORBIDDEN'],
+      ['expired', 401, 'SESSION_EXPIRED'],
+      ['bridge-missing', 503, 'AUTH_UNAVAILABLE'],
+      ['session-only', 503, 'AUTH_UNAVAILABLE'],
+    ] as const) {
+      await error(
+        call('', { Authorization: `Bearer ${actor}`, 'X-Platform-Permission': 'AUDIT_READ' }),
+        status,
+        code,
+      )
+    }
+    for (const query of ['?limit=0', '?limit=101', '?limit=1&limit=2', '?cursor=invalid']) {
+      await error(call(query), 400, 'INVALID_REQUEST')
+    }
+
+    const { results } = await f.db
+      .prepare(
+        `SELECT id, calling_service AS callingService, actor_user_id AS actorUserId,
+        operation, target_id AS targetId, product, owner_kind AS ownerKind, owner_id AS ownerId,
+        request_id AS requestId, details_json, created_at AS createdAt
+        FROM billing_audit ORDER BY created_at DESC, id DESC`,
+      )
+      .all()
+    const expected = results.map(({ details_json, ...row }) => ({
+      ...row,
+      details: JSON.parse(String(details_json)),
+    }))
+    assert.equal(expected.length, 10)
+    assert.ok(expected.every(({ createdAt }) => createdAt === now))
+    assert.deepEqual(await data(call()), { items: expected, nextCursor: null })
+    const firstPage = await data(call('?limit=1'))
+    assert.deepEqual(firstPage.items, expected.slice(0, 1))
+    let cursor = firstPage.nextCursor
+    const collected = [...firstPage.items]
+    for (let index = 1; index < expected.length; index += 1) {
+      assert.ok(cursor)
+      const page = await data(call(`?limit=1&cursor=${encodeURIComponent(cursor)}`))
+      assert.equal(page.items.length, 1)
+      collected.push(...page.items)
+      cursor = page.nextCursor
+    }
+    assert.equal(cursor, null)
+    assert.deepEqual(collected, expected)
+    assert.equal(new Set(collected.map(({ id }) => id)).size, expected.length)
+    assert.ok(
+      collected.some(
+        (item) =>
+          item.operation === 'order.pay' &&
+          item.targetId === first.id &&
+          item.requestId === 'audit-payment',
+      ),
+    )
+    assert.ok(
+      collected.some(
+        (item) =>
+          item.operation === 'order.refund' &&
+          item.targetId === renewal.id &&
+          item.requestId === 'audit-refund',
+      ),
+    )
+    assert.ok(
+      collected.some((item) => item.operation === 'CREDIT_GRANT' && item.actorUserId === null),
+    )
+    assert.ok(
+      collected.some(
+        (item) =>
+          item.operation === 'CREDIT_CONSUME' &&
+          item.actorUserId === 'user-fixture' &&
+          item.callingService === 'work-fixture',
+      ),
+    )
+    assert.equal(f.auditChecks.length, 19)
+    assert.ok(f.auditChecks.every((id) => id === 'audit-reader'))
+
+    f.revokeAuditPermission()
+    await error(
+      call(`?limit=1&cursor=${encodeURIComponent(firstPage.nextCursor)}`),
+      403,
+      'FORBIDDEN',
+    )
+    assert.equal(f.auditChecks.length, 20)
+  })
+
   test('A02 personal month starts at payment and commits initial Credit atomically', async (t) => {
     const f = await setup(t)
     const now = at('2027-01-31T02:00:00Z')

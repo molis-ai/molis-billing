@@ -1,6 +1,7 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used))]
 
 pub mod app;
+mod audit;
 pub mod calendar;
 pub mod catalog;
 pub mod http;

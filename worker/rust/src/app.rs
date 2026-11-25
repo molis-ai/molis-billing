@@ -2,7 +2,7 @@ use serde_json::json;
 use worker::{Env, Method, Request, Response, Result};
 
 use crate::{
-    catalog, credit,
+    audit, catalog, credit,
     http::{ApiError, error, json_response, request_id, valid_id},
     identity::{UserAccess, UserContext, authorize_user, require_internal_channel},
     orders::{Orders, append_first_credit, webhook},
@@ -23,6 +23,7 @@ pub enum Route<'a> {
     CreditBalance,
     CreditLedger,
     Entitlement,
+    PlatformAudit,
     CreateHold,
     SettleHold(&'a str),
     ReleaseHold(&'a str),
@@ -70,6 +71,7 @@ pub fn route(method: Method, path: &str) -> Route<'_> {
         (Method::Get, ["", "api", "v1", "credits", "balance"]) => CreditBalance,
         (Method::Get, ["", "api", "v1", "credits", "ledger"]) => CreditLedger,
         (Method::Post, ["", "api", "v1", "entitlements", "check"]) => Entitlement,
+        (Method::Get, ["", "internal", "v1", "audit-events"]) => PlatformAudit,
         (Method::Post, ["", "internal", "v1", "credits", "holds"]) => CreateHold,
         (Method::Post, ["", "internal", "v1", "credits", "holds", id, "settle"])
             if valid_id(id) =>
@@ -129,6 +131,7 @@ pub async fn handle(request: Request, env: Env) -> Result<Response> {
             )
             .await
         }
+        Route::PlatformAudit => audit::handle(&request, &env).await,
         route if route.is_internal_credit() => credit::handle_internal(&route, request, &env).await,
         route => {
             let Some(access) = route.user_access() else {

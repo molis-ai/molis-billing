@@ -207,6 +207,30 @@ pub async fn introspect_session(
         .ok_or(ApiError::AUTH_UNAVAILABLE)
 }
 
+pub(crate) async fn authorize_platform_audit(
+    request: &Request,
+    env: &Env,
+    request_id: &str,
+) -> Result<(), ApiError> {
+    let data = call_auth(
+        request,
+        env,
+        "/internal/v1/platform/audit/authorize",
+        json!({}),
+        request_id,
+    )
+    .await
+    .map_err(|failure| match failure {
+        // A missing private authorization route is an unavailable dependency.
+        ApiError::NOT_FOUND => ApiError::AUTH_UNAVAILABLE,
+        failure => failure,
+    })?;
+    if !data["userId"].as_str().is_some_and(valid_id) || data["permission"] != "AUDIT_READ" {
+        return Err(ApiError::AUTH_UNAVAILABLE);
+    }
+    Ok(())
+}
+
 async fn call_auth(
     request: &Request,
     env: &Env,
