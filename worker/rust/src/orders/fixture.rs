@@ -67,23 +67,7 @@ fn append_credit(
     first: &FirstCredit<'_>,
     batch: &mut Vec<D1PreparedStatement>,
 ) -> ApiResult<()> {
-    use crate::credit::{CreditScope, FirstMonthGrant, prepare_paid_first_month};
-
-    batch.extend(prepare_paid_first_month(
-        db,
-        &CreditScope {
-            owner: first.owner,
-            product: first.product,
-        },
-        FirstMonthGrant {
-            order_id: first.order_id,
-            anchor: first.anchor,
-            period: &first.period,
-            monthly_credits: first.monthly_credits,
-            paid_at: first.now,
-            request_id: first.request_id,
-        },
-    )?);
+    append_first_credit(db, first, batch)?;
     if first.request_id == "fixture-fail-credit" {
         // Exercise D1 rollback by writing to the append-only ledger after the grant.
         batch.push(prepare(

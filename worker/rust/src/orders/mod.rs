@@ -15,6 +15,7 @@ use crate::{
     app::Route,
     calendar::{self, Anchor, Interval, Period},
     catalog,
+    credit::{CreditScope, FirstMonthGrant, prepare_paid_first_month},
     http::{ApiError, json_response, request_id, valid_id},
     idempotency::{self, Audit, Receipt, ReceiptKey, Success},
     identity::{Owner, VerifiedUser},
@@ -45,6 +46,29 @@ pub struct FirstCredit<'a> {
     pub now: i64,
     pub audit_id: &'a str,
     pub request_id: &'a str,
+}
+
+pub fn append_first_credit(
+    db: &D1Database,
+    first: &FirstCredit<'_>,
+    batch: &mut Vec<D1PreparedStatement>,
+) -> ApiResult<()> {
+    batch.extend(prepare_paid_first_month(
+        db,
+        &CreditScope {
+            owner: first.owner,
+            product: first.product,
+        },
+        FirstMonthGrant {
+            order_id: first.order_id,
+            anchor: first.anchor,
+            period: &first.period,
+            monthly_credits: first.monthly_credits,
+            paid_at: first.now,
+            request_id: first.request_id,
+        },
+    )?);
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -85,6 +109,7 @@ impl<'a> Orders<'a> {
         };
         let result = match route {
             Route::Subscription => self.subscription(subject, user).await.map(Reply::ok),
+            Route::Entitlement => self.entitlement(subject).await.map(Reply::ok),
             Route::ListOrders => self.list(subject, &request).await.map(Reply::ok),
             Route::GetOrder(id) => self.get(subject, id).await.map(Reply::ok),
             Route::CreateOrder => self.create(subject, user, &mut request, request_id).await,
@@ -180,6 +205,15 @@ impl<'a> Orders<'a> {
             "currentPeriod": timeline.current.as_ref().map(|p| p.data(visible)),
             "futurePeriod": timeline.future.as_ref().map(|p| p.data(visible)),
             "paidThroughAt": paid_through.map(|p| p.ends_at),
+        }))
+    }
+
+    async fn entitlement(self, subject: Subject<'_>) -> ApiResult<Value> {
+        let current = Timeline::load(self.db, subject, self.now()).await?.current;
+        Ok(json!({
+            "active": current.is_some(),
+            "planId": current.as_ref().map(|period| &period.plan_id),
+            "endsAt": current.as_ref().map(|period| period.ends_at),
         }))
     }
 

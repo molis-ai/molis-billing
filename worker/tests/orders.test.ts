@@ -165,16 +165,18 @@ async function error(response: Response | Promise<Response>, status: number, cod
 if (process.env.BILLING_ORDER_TEST_NO_MOCK === '1') {
   test('the production artifact rejects Mock and fixture routes even with test bindings', async (t) => {
     const f = await setup(t)
-    const now = at('2027-01-31T02:00:00Z')
-    const pending = { id: 'production-check', amountMinor: 1000, currency: 'CNY' }
-    await data(f.call('/catalog/plans', { now }))
-    await error(f.pay(pending, { now }), 404, 'NOT_FOUND')
-    await error(f.notify(f.event(pending), now), 404, 'NOT_FOUND')
-    await error(f.sweep(now), 404, 'NOT_FOUND')
-    await error(f.create({ now }), 404, 'NOT_FOUND')
-    await error(f.call('/credits/balance', { now }), 404, 'NOT_FOUND')
+    const fixtureTime = at('2000-01-31T02:00:00Z')
+    await data(f.call('/catalog/plans', { now: fixtureTime }))
+    const pending = await data(f.create({ now: fixtureTime }), 201)
+    assert.notEqual(pending.createdAt, fixtureTime)
+    assert.equal(pending.status, 'PENDING_PAYMENT')
+    await error(f.pay(pending, { now: fixtureTime }), 404, 'NOT_FOUND')
+    await error(f.notify(f.event(pending), fixtureTime), 404, 'NOT_FOUND')
+    await error(f.sweep(fixtureTime), 404, 'NOT_FOUND')
+    assert.equal((await data(f.call('/credits/balance', { now: fixtureTime }))).available, 0)
     assert.equal(await f.count('billing_payment_event'), 0)
-    assert.equal(await f.count('billing_order'), 0)
+    assert.equal(await f.count('billing_credit_ledger'), 0)
+    assert.equal(await f.count('billing_order'), 1)
   })
 } else {
   test('A02 personal month starts at payment and commits initial Credit atomically', async (t) => {

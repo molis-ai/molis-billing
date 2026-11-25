@@ -2,9 +2,10 @@ use serde_json::json;
 use worker::{Env, Method, Request, Response, Result};
 
 use crate::{
-    catalog,
+    catalog, credit,
     http::{ApiError, error, json_response, request_id, valid_id},
     identity::{UserAccess, UserContext, authorize_user, require_internal_channel},
+    orders::{Orders, append_first_credit, webhook},
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -116,44 +117,67 @@ pub async fn handle(request: Request, env: Env) -> Result<Response> {
         Route::Webhook(provider) if crate::orders::fixture::enabled(&request, &env) => {
             crate::orders::fixture::webhook(provider, request, &env).await
         }
-        _ => {
-            let access = route.user_access();
-            if (access.is_some() || route.is_internal_credit())
-                && let Err(failure) = require_internal_channel(&request, &env).await
-            {
-                return failure.response();
-            }
-            if let Some(access) = access {
-                let request_id = request_id(&request);
-                let subject = match UserContext::from_request(&request) {
-                    Ok(subject) => subject,
-                    Err(failure) => return failure.response(),
-                };
-                let user = match authorize_user(&request, &env, subject, access, &request_id).await
-                {
-                    Ok(user) => user,
-                    Err(failure) => return failure.response(),
-                };
-                if route == Route::Catalog {
-                    let Ok(database) = env.d1("DB") else {
-                        return ApiError::BILLING_UNAVAILABLE.response();
-                    };
-                    return match catalog::list_plans(&database, &user.product, user.owner.kind)
-                        .await
-                    {
-                        Ok(plans) => json_response(200, &json!({ "data": { "items": plans } })),
-                        Err(failure) => failure.response(),
-                    };
-                }
-                #[cfg(feature = "order-fixture")]
-                if crate::orders::fixture::enabled(&request, &env) {
-                    return crate::orders::fixture::user(route, request, &env, &user, &request_id)
-                        .await;
-                }
-            }
-            error(404, "NOT_FOUND", "Route not found")
+        Route::Webhook(provider) => {
+            let Ok(db) = env.d1("DB") else {
+                return ApiError::BILLING_UNAVAILABLE.response();
+            };
+            webhook(
+                Orders::new(&db, append_first_credit),
+                provider,
+                request,
+                &env,
+            )
+            .await
+        }
+        route if route.is_internal_credit() => credit::handle_internal(&route, request, &env).await,
+        route => {
+            let Some(access) = route.user_access() else {
+                return error(404, "NOT_FOUND", "Route not found");
+            };
+            handle_user(route, access, request, &env).await
         }
     }
+}
+
+async fn handle_user(
+    route: Route<'_>,
+    access: UserAccess,
+    request: Request,
+    env: &Env,
+) -> Result<Response> {
+    if let Err(failure) = require_internal_channel(&request, env).await {
+        return failure.response();
+    }
+    let request_id = request_id(&request);
+    let subject = match UserContext::from_request(&request) {
+        Ok(subject) => subject,
+        Err(failure) => return failure.response(),
+    };
+    let user = match authorize_user(&request, env, subject, access, &request_id).await {
+        Ok(user) => user,
+        Err(failure) => return failure.response(),
+    };
+    if matches!(route, Route::CreditBalance | Route::CreditLedger) {
+        return credit::handle_user(&route, &request, env, &user, &request_id).await;
+    }
+
+    let Ok(db) = env.d1("DB") else {
+        return ApiError::BILLING_UNAVAILABLE.response();
+    };
+    if route == Route::Catalog {
+        return match catalog::list_plans(&db, &user.product, user.owner.kind).await {
+            Ok(plans) => json_response(200, &json!({ "data": { "items": plans } })),
+            Err(failure) => failure.response(),
+        };
+    }
+    #[cfg(feature = "order-fixture")]
+    if crate::orders::fixture::enabled(&request, env) {
+        return crate::orders::fixture::user(route, request, env, &user, &request_id).await;
+    }
+    Orders::new(&db, append_first_credit)
+        .dispatch(&route, request, env, &user, &request_id)
+        .await
+        .unwrap_or_else(|| ApiError::NOT_FOUND.response())
 }
 
 async fn database_ready(env: &Env) -> bool {
