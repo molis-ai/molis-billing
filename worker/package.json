@@ -14,8 +14,8 @@
     "build": "wrangler deploy --dry-run --config wrangler.fixture.jsonc",
     "db:migrate": "wrangler d1 migrations apply molis-billing-local --local --config wrangler.fixture.jsonc --persist-to .wrangler/state && npm run db:seed:local",
     "db:seed:local": "wrangler d1 execute molis-billing-local --local --config wrangler.fixture.jsonc --persist-to .wrangler/state --file seeds/local-test-plans.sql",
-    "format": "node scripts/rust-check.mjs format && prettier --config .prettierrc.json --write ../package.json ../config/platform-targets.json ../scripts scripts tests package.json wrangler.fixture.jsonc",
-    "format:check": "node scripts/rust-check.mjs format:check && prettier --config .prettierrc.json --check ../package.json ../config/platform-targets.json ../scripts scripts tests package.json wrangler.fixture.jsonc"
+    "format": "node scripts/rust-check.mjs format && prettier --config .prettierrc.json --write ../package.json ../config/platform-targets.json ../scripts scripts tests rust/src/runtime package.json wrangler.fixture.jsonc",
+    "format:check": "node scripts/rust-check.mjs format:check && prettier --config .prettierrc.json --check ../package.json ../config/platform-targets.json ../scripts scripts tests rust/src/runtime package.json wrangler.fixture.jsonc"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "5.20261119.1",

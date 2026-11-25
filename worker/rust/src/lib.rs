@@ -1,7 +1,13 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used))]
 
-mod app;
-mod http;
+pub mod app;
+pub mod calendar;
+pub mod catalog;
+pub mod http;
+pub mod idempotency;
+pub mod identity;
+pub mod pagination;
+pub mod storage;
 
 use worker::{Context, Env, Request, Response, Result, ScheduleContext, ScheduledEvent, event};
 

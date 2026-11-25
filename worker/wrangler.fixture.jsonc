@@ -1,7 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "molis-billing-local",
-  "main": "rust/build/index.js",
+  "main": "rust/src/runtime/entrypoint.js",
   "build": {
     "command": "node scripts/rust-build.mjs",
     "watch_dir": ["rust/src", "rust/Cargo.toml", "rust/Cargo.lock"],
@@ -22,5 +22,6 @@
     "BILLING_ORIGIN": "http://127.0.0.1:8788",
     "AUTH_ORIGIN": "http://127.0.0.1:8787",
     "ENVIRONMENT_ID": "billing-local",
+    "MOLIS_ENVIRONMENT": "dev",
   },
 }

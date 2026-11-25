@@ -12,7 +12,7 @@ const path = (relative) => fileURLToPath(new URL(relative, root))
 export function billingEnvironment(name, dryRun) {
   const file = `config/${name}.properties`
   const { databaseId, ...settings } = readProperties(new URL(file, root))
-  const target = targets[name]
+  const { authWorkerName, ...target } = targets[name]
   for (const [key, value] of Object.entries(target)) {
     if (settings[key] !== value)
       throw new Error(`Expected ${key} to match the platform target in ${file}.`)
@@ -25,16 +25,20 @@ export function billingEnvironment(name, dryRun) {
     BILLING_ORIGIN: target.billingOrigin,
     AUTH_ORIGIN: target.authOrigin,
     ENVIRONMENT_ID: target.environmentId,
+    MOLIS_ENVIRONMENT: name,
   }
   const platform = {
     name: target.workerName,
-    main: path('worker/rust/build/index.js'),
+    main: path('worker/rust/src/runtime/entrypoint.js'),
     compatibility_date: compatibilityDate,
     workers_dev: false,
     preview_urls: false,
     ...(name === 'dev'
       ? {}
-      : { routes: [{ pattern: new URL(target.billingOrigin).hostname, custom_domain: true }] }),
+      : {
+          routes: [{ pattern: new URL(target.billingOrigin).hostname, custom_domain: true }],
+          services: [{ binding: 'AUTH', service: authWorkerName, entrypoint: 'AuthInternal' }],
+        }),
     vars,
     d1_databases: [
       {
@@ -49,7 +53,11 @@ export function billingEnvironment(name, dryRun) {
     ? {}
     : readProperties(new URL(`secrets/${name}.properties`, root), { optional: true })
   for (const key of Object.keys(secrets)) {
-    if (!/^[A-Z][A-Z0-9_]*$/u.test(key) || Object.hasOwn(vars, key) || key === 'DB') {
+    if (
+      !/^[A-Z][A-Z0-9_]*$/u.test(key) ||
+      Object.hasOwn(vars, key) ||
+      ['DB', 'AUTH'].includes(key)
+    ) {
       throw new Error(`Invalid Worker secret name in secrets/${name}.properties.`)
     }
   }

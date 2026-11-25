@@ -12,7 +12,11 @@ const binary = join(
   process.platform === 'win32' ? 'worker-build.exe' : 'worker-build',
 )
 if (!existsSync(binary)) throw new Error('Run npm run setup to install worker-build.')
-execFileSync(binary, ['--release', '--no-opt', '.', '--locked'], {
+const args = process.argv.slice(2)
+if (args.length > 1 || (args.length === 1 && args[0] !== '--production'))
+  throw new Error('Use --production to compile without default features.')
+const cargoArgs = args.length ? ['--locked', '--no-default-features'] : ['--locked']
+execFileSync(binary, ['--release', '--no-opt', '.', ...cargoArgs], {
   cwd,
   env: rustEnvironment(),
   stdio: 'inherit',

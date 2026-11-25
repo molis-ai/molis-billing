@@ -1,6 +1,6 @@
 # Molis Billing
 
-Molis Billing is the service for billing, orders, and the Credit ledger. Identity and organization records belong to Molis Auth. This initial project provides a Cloudflare Worker in Rust/WASM, a D1 binding, and two operational probes.
+Molis Billing is the service for billing, orders, and the Credit ledger. Identity and organization records belong to Molis Auth. This project provides a Cloudflare Worker in Rust/WASM, the foundational D1 billing schema, a scoped catalog, and operational probes. The [Billing v1 contract](docs/billing-v1-contract.md) describes the Auth transport and shared interfaces.
 
 ## Local development
 
@@ -19,7 +19,7 @@ curl -i http://127.0.0.1:8788/api/v1/health
 curl -i http://127.0.0.1:8788/api/v1/readiness
 ```
 
-Health reports the Worker identity and environment. Readiness queries D1 and returns HTTP 503 when the query or binding is unavailable.
+Health reports the Worker identity and environment. Readiness checks that the billing tables are readable and returns HTTP 503 if the binding or migrations are missing. An empty database is ready after migration.
 
 ## Environments
 
@@ -31,7 +31,7 @@ Health reports the Worker identity and environment. Readiness queries D1 and ret
 
 `config/<env>.properties` holds non-secret settings and `config/platform-targets.json` records the environment targets. The test and production D1 IDs are placeholders. Dry runs use a fixture ID until each database is configured. Real deployment to either environment requires its own valid D1 ID.
 
-If the Worker gains secrets, store them by environment in ignored `secrets/<env>.properties` files. Copy the matching template from `secrets.example/` and enter one `UPPER_SNAKE_CASE=value` per line. The current Worker requires no secrets.
+Store `MOLIS_INTERNAL_SECRET` in the ignored `secrets/<env>.properties` file, using the matching template from `secrets.example/`. Use the same 32-byte base64url secret in Auth and Billing for that environment. Dev connects to Auth on loopback. Test and prod connect to the matching `AuthInternal` Service Binding. Health and readiness work without the secret.
 
 ## Checks
 
@@ -45,4 +45,4 @@ npm run deploy -- --env test --dry-run
 npm run deploy -- --env prod --dry-run
 ```
 
-Use `npm run format` to apply rustfmt and Prettier. The tests cover configuration, Rust routing, and the compiled Worker in Miniflare with in-memory D1. GitHub Actions runs these checks and packages each environment in dry-run mode.
+Use `npm run format` to apply rustfmt and Prettier. The tests cover configuration, calendar boundaries, the compiled Worker and named bindings in Miniflare, and fresh or upgraded isolated D1 databases. The prod deployment command and its dry-run both build with `--no-default-features`. GitHub Actions runs these checks and packages each environment in dry-run mode.

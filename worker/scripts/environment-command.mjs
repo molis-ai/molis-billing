@@ -52,7 +52,7 @@ function run(script, args = []) {
   })
 }
 
-await run('scripts/rust-build.mjs')
+await run('scripts/rust-build.mjs', name === 'prod' ? ['--production'] : [])
 if (!receivedSignal) {
   const staging = mkdtempSync(join(tmpdir(), 'molis-billing-'))
   try {

@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict'
 import { after, before, test } from 'node:test'
 import { startLocalRuntime } from '../scripts/local-runtime.mjs'
+import { applySchema } from './d1-fixture.ts'
 
 let runtime: ReturnType<typeof startLocalRuntime>
 
-before(() => {
+before(async () => {
   runtime = startLocalRuntime()
+  await applySchema(await runtime.getD1Database('DB', 'billing'))
 })
 after(() => runtime.dispose())
 
@@ -30,6 +32,18 @@ test('readiness probes the isolated D1 database', async () => {
   const response = await runtime.dispatchFetch('http://billing.test/api/v1/readiness')
   assert.equal(response.status, 200)
   assert.deepEqual(await response.json(), { data: { status: 'READY', database: 'UP' } })
+})
+
+test('readiness fails on empty and 0002-only isolated D1', async (context) => {
+  const worker = startLocalRuntime()
+  context.after(() => worker.dispose())
+  const db = await worker.getD1Database('DB', 'billing')
+  for (const stages of [0, 2]) {
+    if (stages) await applySchema(db, 1, stages)
+    const response = await worker.dispatchFetch('http://billing.test/api/v1/readiness')
+    assert.equal(response.status, 503)
+    assert.equal((await response.json()).error.code, 'NOT_READY')
+  }
 })
 
 test('a missing D1 binding fails readiness while the Worker stays healthy', async (context) => {
