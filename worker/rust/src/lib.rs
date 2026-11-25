@@ -6,6 +6,7 @@ pub mod catalog;
 pub mod http;
 pub mod idempotency;
 pub mod identity;
+pub mod orders;
 pub mod pagination;
 pub mod storage;
 

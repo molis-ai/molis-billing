@@ -14,12 +14,15 @@ const binary = join(
 if (!existsSync(binary)) throw new Error('Run npm run setup to install worker-build.')
 const args = process.argv.slice(2)
 const cargoArgs = ['--locked']
-if (args.length === 1 && args[0] === '--production') {
+const fixtureFeatures = ['order-fixture', 'credit-fixture']
+if (args.includes('--production')) {
+  if (args.length !== 1) throw new Error('--production must be used without fixture options.')
   cargoArgs.push('--no-default-features')
-} else if (args.length === 1 && args[0] === '--credit-fixture') {
-  cargoArgs.push('--features', 'credit-fixture')
-} else if (args.length) {
-  throw new Error('Use --production for deployment or --credit-fixture for local acceptance.')
+} else {
+  if (args.some((arg) => !fixtureFeatures.some((feature) => arg === `--${feature}`)))
+    throw new Error('Use --production for deployment or fixture options for local acceptance.')
+  const selected = fixtureFeatures.filter((feature) => args.includes(`--${feature}`))
+  if (selected.length) cargoArgs.push('--features', selected.join(','))
 }
 execFileSync(binary, ['--release', '--no-opt', '.', ...cargoArgs], {
   cwd,

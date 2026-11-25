@@ -16,6 +16,7 @@ pub enum Route<'a> {
     ListOrders,
     GetOrder(&'a str),
     CreateOrder,
+    #[cfg(feature = "mock-payment")]
     MockPay(&'a str),
     Refund(&'a str),
     CreditBalance,
@@ -36,9 +37,9 @@ impl Route<'_> {
             Catalog | Subscription | CreditBalance | CreditLedger | Entitlement => {
                 Some(UserAccess::Read)
             }
-            ListOrders | GetOrder(_) | CreateOrder | MockPay(_) | Refund(_) => {
-                Some(UserAccess::Manage)
-            }
+            ListOrders | GetOrder(_) | CreateOrder | Refund(_) => Some(UserAccess::Manage),
+            #[cfg(feature = "mock-payment")]
+            MockPay(_) => Some(UserAccess::Manage),
             _ => None,
         }
     }
@@ -62,6 +63,7 @@ pub fn route(method: Method, path: &str) -> Route<'_> {
         (Method::Get, ["", "api", "v1", "orders"]) => ListOrders,
         (Method::Get, ["", "api", "v1", "orders", id]) if valid_id(id) => GetOrder(id),
         (Method::Post, ["", "api", "v1", "orders"]) => CreateOrder,
+        #[cfg(feature = "mock-payment")]
         (Method::Post, ["", "api", "v1", "orders", id, "mock-pay"]) if valid_id(id) => MockPay(id),
         (Method::Post, ["", "api", "v1", "orders", id, "refund"]) if valid_id(id) => Refund(id),
         (Method::Get, ["", "api", "v1", "credits", "balance"]) => CreditBalance,
@@ -110,6 +112,10 @@ pub async fn handle(request: Request, env: Env) -> Result<Response> {
                 error(503, "NOT_READY", "Database unavailable")
             }
         }
+        #[cfg(feature = "order-fixture")]
+        Route::Webhook(provider) if crate::orders::fixture::enabled(&request, &env) => {
+            crate::orders::fixture::webhook(provider, request, &env).await
+        }
         _ => {
             let access = route.user_access();
             if (access.is_some() || route.is_internal_credit())
@@ -138,6 +144,11 @@ pub async fn handle(request: Request, env: Env) -> Result<Response> {
                         Ok(plans) => json_response(200, &json!({ "data": { "items": plans } })),
                         Err(failure) => failure.response(),
                     };
+                }
+                #[cfg(feature = "order-fixture")]
+                if crate::orders::fixture::enabled(&request, &env) {
+                    return crate::orders::fixture::user(route, request, &env, &user, &request_id)
+                        .await;
                 }
             }
             error(404, "NOT_FOUND", "Route not found")
@@ -171,9 +182,15 @@ mod tests {
 
     #[test]
     fn shared_route_matching_rejects_wrong_method_and_extra_segments() {
+        #[cfg(feature = "mock-payment")]
         assert_eq!(
             route(Method::Post, "/api/v1/orders/o-1/mock-pay"),
             Route::MockPay("o-1")
+        );
+        #[cfg(not(feature = "mock-payment"))]
+        assert_eq!(
+            route(Method::Post, "/api/v1/orders/o-1/mock-pay"),
+            Route::NotFound
         );
         assert_eq!(
             route(Method::Get, "/api/v1/orders/o-1/mock-pay"),
