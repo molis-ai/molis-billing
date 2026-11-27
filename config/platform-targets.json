@@ -8,6 +8,7 @@
   },
   "test": {
     "workerName": "molis-billing-test",
+    "authWorkerName": "molis-auth-test",
     "databaseName": "molis-billing-test",
     "billingOrigin": "https://billing.test.molis.ai",
     "authOrigin": "https://auth.test.molis.ai",
@@ -15,6 +16,7 @@
   },
   "prod": {
     "workerName": "molis-billing-production",
+    "authWorkerName": "molis-auth-production",
     "databaseName": "molis-billing-prod",
     "billingOrigin": "https://billing.molis.ai",
     "authOrigin": "https://auth.molis.ai",
