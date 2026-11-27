@@ -1,9 +1,9 @@
-use serde_json::json;
+use serde_json::{Value, json};
 use worker::{Env, Method, Request, Response, Result};
 
 use crate::{
     audit, catalog, credit,
-    http::{ApiError, error, json_response, request_id, valid_id},
+    http::{ApiError, error, json_response, read_json, request_id, valid_id},
     identity::{UserAccess, UserContext, authorize_user, require_internal_channel},
     orders::{Orders, append_first_credit, webhook},
 };
@@ -92,8 +92,26 @@ pub fn route(method: Method, path: &str) -> Route<'_> {
 }
 
 pub async fn handle(request: Request, env: Env) -> Result<Response> {
+    let id = request_id(&request);
+    let mut response = dispatch(request, env, &id).await?;
+    if response.status_code() < 400 {
+        return Ok(response);
+    }
+    let status = response.status_code();
+    let mut body: Value = response.json().await?;
+    body["requestId"] = json!(&id);
+    let mut response = json_response(status, &body)?;
+    response.headers_mut().set("X-Request-Id", &id)?;
+    Ok(response)
+}
+
+async fn dispatch(request: Request, env: Env, request_id: &str) -> Result<Response> {
     let path = request.path();
-    let route = route(request.method(), &path);
+    let method = request.method();
+    if request.inner().method() != method.as_ref() {
+        return error(405, "METHOD_NOT_ALLOWED", "Method not allowed");
+    }
+    let route = route(method, &path);
     match route {
         Route::Health => json_response(
             200,
@@ -137,7 +155,7 @@ pub async fn handle(request: Request, env: Env) -> Result<Response> {
             let Some(access) = route.user_access() else {
                 return error(404, "NOT_FOUND", "Route not found");
             };
-            handle_user(route, access, request, &env).await
+            handle_user(route, access, request, &env, request_id).await
         }
     }
 }
@@ -145,23 +163,27 @@ pub async fn handle(request: Request, env: Env) -> Result<Response> {
 async fn handle_user(
     route: Route<'_>,
     access: UserAccess,
-    request: Request,
+    mut request: Request,
     env: &Env,
+    request_id: &str,
 ) -> Result<Response> {
     if let Err(failure) = require_internal_channel(&request, env).await {
         return failure.response();
     }
-    let request_id = request_id(&request);
-    let subject = match UserContext::from_request(&request) {
+    let paginated = matches!(route, Route::ListOrders | Route::CreditLedger);
+    let subject = match UserContext::from_request(&request, paginated) {
         Ok(subject) => subject,
         Err(failure) => return failure.response(),
     };
-    let user = match authorize_user(&request, env, subject, access, &request_id).await {
+    if let Err(failure) = validate_user_request(&route, &mut request).await {
+        return failure.response();
+    }
+    let user = match authorize_user(&request, env, subject, access, request_id).await {
         Ok(user) => user,
         Err(failure) => return failure.response(),
     };
     if matches!(route, Route::CreditBalance | Route::CreditLedger) {
-        return credit::handle_user(&route, &request, env, &user, &request_id).await;
+        return credit::handle_user(&route, &request, env, &user, request_id).await;
     }
 
     let Ok(db) = env.d1("DB") else {
@@ -175,12 +197,42 @@ async fn handle_user(
     }
     #[cfg(feature = "order-fixture")]
     if crate::orders::fixture::enabled(&request, env) {
-        return crate::orders::fixture::user(route, request, env, &user, &request_id).await;
+        return crate::orders::fixture::user(route, request, env, &user, request_id).await;
     }
     Orders::new(&db, append_first_credit)
-        .dispatch(&route, request, env, &user, &request_id)
+        .dispatch(&route, request, env, &user, request_id)
         .await
         .unwrap_or_else(|| ApiError::NOT_FOUND.response())
+}
+
+async fn validate_user_request(
+    route: &Route<'_>,
+    request: &mut Request,
+) -> std::result::Result<(), ApiError> {
+    let key = request
+        .headers()
+        .get("Idempotency-Key")
+        .map_err(|_| ApiError::INVALID_REQUEST)?;
+    let required = match route {
+        Route::CreateOrder | Route::Refund(_) => true,
+        #[cfg(feature = "mock-payment")]
+        Route::MockPay(_) => true,
+        _ => false,
+    };
+    if (required && key.is_none()) || key.as_deref().is_some_and(|key| !valid_id(key)) {
+        return Err(ApiError::INVALID_REQUEST);
+    }
+    match request.method() {
+        Method::Get if request.inner().body().is_some() => Err(ApiError::INVALID_REQUEST),
+        Method::Post if *route != Route::CreateOrder => {
+            let body = read_json::<serde_json::Map<String, Value>>(request).await?;
+            if body.is_some_and(|object| !object.is_empty()) {
+                return Err(ApiError::INVALID_REQUEST);
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 async fn database_ready(env: &Env) -> bool {

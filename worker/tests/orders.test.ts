@@ -16,7 +16,7 @@ const at = (iso: string) => Date.parse(iso)
 type Scope = {
   now?: number
   commitTime?: number
-  key?: string
+  key?: string | null
   actor?: string
   tenant?: string
   requestId?: string
@@ -84,7 +84,7 @@ async function setup(t: TestContext, environment = 'test', withWebhookSecret = t
   await seedPlans(db)
 
   let keySequence = 0
-  function call(path: string, scope: Scope = {}, method = 'GET', body?: object) {
+  function call(path: string, scope: Scope = {}, method = 'GET', body?: object | string) {
     const url =
       origin + base + path + (scope.tenant ? `?ownerKind=TENANT&ownerId=${scope.tenant}` : '')
     return caller.fetch(url, {
@@ -100,11 +100,14 @@ async function setup(t: TestContext, environment = 'test', withWebhookSecret = t
         ...(scope.commitTime !== undefined && {
           'X-Order-Fixture-Commit-Time': String(scope.commitTime),
         }),
-        ...(method === 'POST' && { 'Idempotency-Key': scope.key ?? `request-${++keySequence}` }),
+        ...(method === 'POST' &&
+          scope.key !== null && {
+            'Idempotency-Key': scope.key ?? `request-${++keySequence}`,
+          }),
         ...(scope.requestId && { 'X-Request-Id': scope.requestId }),
         ...(body && { 'Content-Type': 'application/json' }),
       },
-      ...(body && { body: JSON.stringify(body) }),
+      ...(body && { body: typeof body === 'string' ? body : JSON.stringify(body) }),
     })
   }
 
@@ -213,6 +216,43 @@ if (process.env.BILLING_ORDER_TEST_NO_MOCK === '1') {
     assert.equal(await f.count('billing_order'), 1)
   })
 } else {
+  test('Billing validates browser-route inputs without the Auth proxy', async (t) => {
+    const f = await setup(t)
+    for (const path of [
+      '/catalog/plans?unknown=WORK',
+      '/subscriptions?product=WORK&product=WORK',
+      '/credits/balance?limit=1',
+      '/orders?ownerKind=TEAM',
+      '/orders?ownerKind=TENANT',
+      '/orders?ownerKind=TENANT&ownerId=invalid%2Fid',
+      '/orders?limit=0',
+      '/credits/ledger?cursor=invalid',
+      '/credits/ledger?limit=1&limit=2',
+    ]) {
+      await error(f.call(path), 400, 'INVALID_REQUEST')
+    }
+    const create = { planId: personal, interval: 'MONTH' }
+    for (const [path, scope, payload] of [
+      ['/orders', { key: null }, create],
+      ['/orders', { key: 'bad key' }, create],
+      ['/orders', {}, { ...create, actorUserId: 'spoofed' }],
+      ['/orders', {}, '{'],
+      ['/orders', {}, '{"planId":"first","planId":"second","interval":"MONTH"}'],
+      ['/orders/missing/mock-pay', { key: null }, {}],
+      ['/orders/missing/refund', {}, { reason: 'extra field' }],
+      ['/entitlements/check', {}, '[]'],
+    ] as [string, Scope, object | string][]) {
+      const response = await f.call(path, { ...scope, requestId: 'browser.input' }, 'POST', payload)
+      assert.equal(response.headers.get('X-Request-Id'), 'browser.input')
+      assert.equal((await response.clone().json()).requestId, 'browser.input')
+      await error(response, 400, 'INVALID_REQUEST')
+    }
+    const response = await f.call('/orders', { requestId: 'wrong.method' }, 'PATCH')
+    assert.equal((await response.clone().json()).requestId, 'wrong.method')
+    await error(response, 404, 'NOT_FOUND')
+    assert.equal(await f.count('billing_order'), 0)
+  })
+
   test('platform audit pages real payment, refund and Credit writes with fresh permission checks', async (t) => {
     const f = await setup(t)
     const now = at('2027-06-12T07:30:00Z')

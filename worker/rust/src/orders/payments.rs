@@ -83,7 +83,7 @@ impl Orders<'_> {
     pub(super) async fn confirm(
         self,
         user: &VerifiedUser,
-        request: &mut Request,
+        request: &Request,
         env: &Env,
         id: &str,
         request_id: &str,
@@ -95,18 +95,6 @@ impl Orders<'_> {
             ApiError::NOT_FOUND
         })?;
         let key = idempotency::header(request)?;
-        let body = request
-            .bytes()
-            .await
-            .map_err(|_| ApiError::INVALID_REQUEST)?;
-        if !body.is_empty()
-            && serde_json::from_slice::<Value>(&body)
-                .ok()
-                .and_then(|value| value.as_object().map(|object| object.is_empty()))
-                != Some(true)
-        {
-            return Err(ApiError::INVALID_REQUEST);
-        }
         let kind = if refund { Kind::Refund } else { Kind::Payment };
         let subject = Subject {
             product: &user.product,

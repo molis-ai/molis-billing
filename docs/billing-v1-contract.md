@@ -4,7 +4,7 @@
 
 ## 用户侧转发与鉴权
 
-Auth 的浏览器路由为 `/api/account/billing` 加下表路径。Billing 的入站路由为 `/api/v1` 加同一路径。Auth 从 HttpOnly Cookie 取得当前网页会话，写请求沿用现有 CSRF 校验。Auth 逐条匹配下表，按原 HTTP 动词转发 JSON 和已允许的查询参数，并透传 `Idempotency-Key` 与 `X-Request-Id`。Auth 将服务端取得的中央会话访问凭证作为 `Authorization: Bearer <access token>`，和 `X-Molis-Internal-Secret` 一起发送给 Billing。
+Auth 的浏览器路由为 `/api/account/billing` 加下表路径。Billing 的入站路由为 `/api/v1` 加同一路径。Auth 从 HttpOnly Cookie 取得当前网页会话，写请求沿用现有 CSRF 校验。Auth 按原 HTTP 动词转发 JSON 和查询串，并透传 `Idempotency-Key` 与 `X-Request-Id`。Billing 负责匹配具体路由、验证查询和请求字段、校验必填幂等键以及返回业务错误。Auth 将服务端取得的中央会话访问凭证作为 `Authorization: Bearer <access token>`，和 `X-Molis-Internal-Secret` 一起发送给 Billing。
 
 | 方法 | 路径 | 访问 |
 | --- | --- | --- |
@@ -31,7 +31,7 @@ Billing 使用 `AUTH` 绑定分别连接 `molis-auth-test`、`molis-auth-product
 
 ### 数据与分页
 
-成功 envelope 为 `{"data":...}`，错误 envelope 为 `{"error":{"code":"...","message":"..."}}`。时间字段是 UTC Unix 毫秒整数，金额是币种的最小货币单位整数，Credit 是整数。标识符是字符串。JSON DTO 字段采用 camelCase。下列列表对象为 `data: {items, nextCursor}`，其中 `nextCursor` 可为 null。
+成功 envelope 为 `{"data":...}`，错误 envelope 为 `{"error":{"code":"...","message":"..."},"requestId":"..."}`，响应头 `X-Request-Id` 与错误正文中的 ID 一致。时间字段是 UTC Unix 毫秒整数，金额是币种的最小货币单位整数，Credit 是整数。标识符是字符串。JSON DTO 字段采用 camelCase。下列列表对象为 `data: {items, nextCursor}`，其中 `nextCursor` 可为 null。
 
 - 订单、流水和授权的审计列表使用 `limit` 和 `cursor`。默认 20，允许 1–100，按 `created_at DESC, id DESC` 稳定排序。读取 `limit+1` 条以生成下一页位置，下一页在已过滤范围内使用 `(created_at,id) < (?,?)`。客户端原样带回服务端返回的 cursor。
 - 目录返回 `data: {items}`，每项为 `{planId, planVersion, product, ownerKind, name, currency, monthlyPriceMinor, yearlyPriceMinor, monthlyCredits}`。只返回相应主体类型在售的当前版本，按 planId 排序。

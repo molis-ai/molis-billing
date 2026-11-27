@@ -58,6 +58,7 @@ test('a missing D1 binding fails readiness while the Worker stays healthy', asyn
   assert.equal(response.status, 503)
   assert.deepEqual(await response.json(), {
     error: { code: 'NOT_READY', message: 'Database unavailable' },
+    requestId: response.headers.get('X-Request-Id'),
   })
 })
 
@@ -66,5 +67,6 @@ test('unknown routes return a generic JSON error', async () => {
   assert.equal(response.status, 404)
   assert.deepEqual(await response.json(), {
     error: { code: 'NOT_FOUND', message: 'Route not found' },
+    requestId: response.headers.get('X-Request-Id'),
   })
 })

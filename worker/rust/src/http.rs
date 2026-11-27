@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Serialize, de::DeserializeOwned};
 use serde_json::json;
 use wasm_bindgen::prelude::*;
 use worker::{Request, Response, Result};
@@ -77,6 +77,36 @@ pub fn valid_id(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+pub async fn read_json<T: DeserializeOwned>(
+    request: &mut Request,
+) -> std::result::Result<Option<T>, ApiError> {
+    if request.inner().body().is_none() {
+        return Ok(None);
+    }
+    let body = request
+        .bytes()
+        .await
+        .map_err(|_| ApiError::INVALID_REQUEST)?;
+    if body.is_empty() {
+        return Ok(None);
+    }
+    let content_type = request
+        .headers()
+        .get("Content-Type")
+        .map_err(|_| ApiError::INVALID_REQUEST)?;
+    if body.len() > 16 * 1024
+        || !content_type
+            .as_deref()
+            .and_then(|value| value.split(';').next())
+            .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("application/json"))
+    {
+        return Err(ApiError::INVALID_REQUEST);
+    }
+    serde_json::from_slice(&body)
+        .map(Some)
+        .map_err(|_| ApiError::INVALID_REQUEST)
 }
 
 pub fn json_response(status: u16, body: &impl Serialize) -> Result<Response> {

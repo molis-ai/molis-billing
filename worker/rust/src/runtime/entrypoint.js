@@ -8,15 +8,18 @@ function isPublic(path) {
   )
 }
 
-function notFound() {
+function notFound(request) {
+  const incomingId = request.headers.get('X-Request-Id') ?? ''
+  const requestId = /^[A-Za-z0-9_.-]{1,128}$/u.test(incomingId) ? incomingId : crypto.randomUUID()
   return Response.json(
-    { error: { code: 'NOT_FOUND', message: 'Route not found' } },
+    { error: { code: 'NOT_FOUND', message: 'Route not found' }, requestId },
     {
       status: 404,
       headers: {
         'Content-Type': 'application/json; charset=utf-8',
         'Cache-Control': 'no-store',
         'X-Content-Type-Options': 'nosniff',
+        'X-Request-Id': requestId,
         'X-Frame-Options': 'DENY',
         'Referrer-Policy': 'no-referrer',
       },
@@ -32,14 +35,19 @@ export default class extends BillingWorker {
       env.MOLIS_ENVIRONMENT === 'dev' &&
       env.BILLING_ORIGIN === 'http://127.0.0.1:8788' &&
       url.origin === env.BILLING_ORIGIN
-    if (!local && !isPublic(url.pathname)) return notFound()
+    if (isPublic(url.pathname)) {
+      // Auth's browser proxy uses this server-only header in local development, too.
+      if (request.headers.has('X-Molis-Internal-Secret')) return notFound(request)
+    } else if (!local) {
+      return notFound(request)
+    }
     return super.fetch(request)
   }
 }
 
 export class BillingInternal extends BillingWorker {
   fetch(request) {
-    if (isPublic(new URL(request.url).pathname)) return notFound()
+    if (isPublic(new URL(request.url).pathname)) return notFound(request)
     return super.fetch(request)
   }
 }

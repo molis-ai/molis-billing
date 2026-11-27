@@ -60,7 +60,7 @@ async fn read(
     clock: Result<i64>,
 ) -> Result<(u16, serde_json::Value)> {
     require_internal_channel(request, env).await?;
-    let subject = UserContext::from_request(request)?;
+    let subject = UserContext::from_request(request, matches!(route, Route::CreditLedger))?;
     let request_id = request_id(request);
     let user = authorize_user(request, env, subject, UserAccess::Read, &request_id).await?;
     handle_user_at(route, request, env, &user, &request_id, clock).await

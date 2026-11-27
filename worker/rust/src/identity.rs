@@ -84,7 +84,7 @@ pub struct UserContext {
 }
 
 impl UserContext {
-    pub fn from_request(request: &Request) -> Result<Self, ApiError> {
+    pub fn from_request(request: &Request, paginated: bool) -> Result<Self, ApiError> {
         let url = request.url().map_err(|_| ApiError::INVALID_REQUEST)?;
         let mut product = None;
         let mut kind = None;
@@ -94,7 +94,8 @@ impl UserContext {
                 "product" => &mut product,
                 "ownerKind" => &mut kind,
                 "ownerId" => &mut id,
-                _ => continue,
+                "limit" | "cursor" if paginated => continue,
+                _ => return Err(ApiError::INVALID_REQUEST),
             };
             if slot.replace(value.into_owned()).is_some() {
                 return Err(ApiError::INVALID_REQUEST);

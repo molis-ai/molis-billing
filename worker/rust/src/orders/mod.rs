@@ -115,11 +115,11 @@ impl<'a> Orders<'a> {
             Route::CreateOrder => self.create(subject, user, &mut request, request_id).await,
             #[cfg(feature = "mock-payment")]
             Route::MockPay(id) => {
-                self.confirm(user, &mut request, env, id, request_id, false)
+                self.confirm(user, &request, env, id, request_id, false)
                     .await
             }
             Route::Refund(id) => {
-                self.confirm(user, &mut request, env, id, request_id, true)
+                self.confirm(user, &request, env, id, request_id, true)
                     .await
             }
             _ => return None,
@@ -225,10 +225,9 @@ impl<'a> Orders<'a> {
         request_id: &str,
     ) -> ApiResult<Reply> {
         let key = idempotency::header(request)?;
-        let body: CreateOrder = request
-            .json()
-            .await
-            .map_err(|_| ApiError::INVALID_REQUEST)?;
+        let body: CreateOrder = crate::http::read_json(request)
+            .await?
+            .ok_or(ApiError::INVALID_REQUEST)?;
         if !valid_id(&body.plan_id) {
             return Err(ApiError::INVALID_REQUEST);
         }
