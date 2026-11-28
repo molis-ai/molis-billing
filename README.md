@@ -1,6 +1,6 @@
 # Molis Billing
 
-Molis Billing is the service for billing, orders, and the Credit ledger. Identity and organization records belong to Molis Auth. This project provides a Cloudflare Worker in Rust/WASM, the foundational D1 billing schema, a scoped catalog, and operational probes. The [Billing v1 contract](docs/billing-v1-contract.md) describes the Auth transport and shared interfaces.
+Molis Billing is the service for billing, orders, and the Credit ledger. Identity and organization records belong to Molis Auth. This project provides a Cloudflare Worker in Rust/WASM, a scoped catalog, subscriptions, payments and refunds, credit holds and settlements, paginated audit history, and operational probes. The [Billing v1 contract](docs/billing-v1-contract.md) describes the Auth transport and shared interfaces.
 
 ## Local development
 
@@ -12,7 +12,7 @@ npm --prefix worker run db:migrate
 npm run dev
 ```
 
-`npm start -- --env dev` is equivalent. The Worker listens on `127.0.0.1:8788`. The local migration command uses the development server's D1 state and seeds two Work test plans: personal (CNY 10/month or 100/year, 100 credits/month) and team (CNY 30/month or 300/year, 500 credits/month). Running it again preserves existing plan versions. The test data lives outside the shared migrations.
+`npm start -- --env dev` is equivalent. The Worker listens on `127.0.0.1:8788`. Initialize a fresh database with `worker/migrations/0001_billing_baseline.sql`. The local migration command uses the development server's D1 state and seeds two Work test plans: personal (CNY 10/month or 100/year, 100 credits/month) and team (CNY 30/month or 300/year, 500 credits/month). Running it again preserves existing plan versions. The test data lives outside the shared migrations.
 
 ```sh
 curl -i http://127.0.0.1:8788/api/v1/health
@@ -45,4 +45,4 @@ npm run deploy -- --env test --dry-run
 npm run deploy -- --env prod --dry-run
 ```
 
-Use `npm run format` to apply rustfmt and Prettier. The tests cover configuration, calendar boundaries, the compiled Worker and named bindings in Miniflare, and fresh or upgraded isolated D1 databases. The prod deployment command and its dry-run both build with `--no-default-features`. GitHub Actions runs these checks and packages each environment in dry-run mode.
+Use `npm run format` to apply rustfmt and Prettier. The tests cover configuration, calendar boundaries, the compiled Worker and named bindings in Miniflare, and isolated D1 baseline initialization and repeatable seeds. Clippy checks the default, production, and test-fixture feature sets. Use `npm --prefix worker run build:rust -- --production` to package the Worker without the mock payment adapter or test routes. The prod deployment command and its dry-run both build with `--no-default-features`. GitHub Actions runs these checks and packages each environment in dry-run mode.

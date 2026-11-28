@@ -7,10 +7,10 @@ use super::{
     guard, new_id, number,
 };
 use crate::{
-    calendar::{Anchor, Period, boundary_at},
-    http::ApiError,
-    idempotency::Audit,
-    storage::{self, CommitFailure},
+    core::calendar::{Anchor, Period, boundary_at},
+    core::http::ApiError,
+    core::idempotency::Audit,
+    core::storage::{self, CommitFailure},
 };
 
 #[derive(Deserialize)]
@@ -51,6 +51,7 @@ struct PaidPeriod {
 struct Grant<'a> {
     order_id: &'a str,
     month_index: u32,
+    last: bool,
     starts_at: i64,
     expires_at: i64,
     amount: i64,
@@ -78,6 +79,7 @@ pub fn prepare_paid_first_month(
     let grant = Grant {
         order_id: payment.order_id,
         month_index: 0,
+        last: payment.period.month_count == 1,
         starts_at: payment.paid_at,
         expires_at,
         amount: payment.monthly_credits,
@@ -91,12 +93,28 @@ pub async fn sync_credit_periods(
     now: i64,
     request_id: &str,
 ) -> Result<()> {
+    sync_until(db, scope, now, request_id, i64::MAX).await
+}
+
+pub(super) async fn sync_until(
+    db: &D1Database,
+    scope: &CreditScope<'_>,
+    now: i64,
+    request_id: &str,
+    deadline: i64,
+) -> Result<()> {
     // Apply hold deadlines that fell before the month ended before archiving its buckets.
-    cleanup::release_due_holds(db, scope, now, request_id).await?;
-    archive_due(db, scope, now, request_id).await?;
+    cleanup::release_due_holds(db, scope, now, request_id, deadline).await?;
+    if storage::now() >= deadline {
+        return Ok(());
+    }
+    archive_due(db, scope, now, request_id, deadline).await?;
+    if storage::now() >= deadline {
+        return Ok(());
+    }
 
     let mut values = scope.values().to_vec();
-    values.push(number(now));
+    values.push(number(now)?);
     let paid: Vec<PaidPeriod> = bind(
         db,
         "SELECT p.order_id, p.month_offset, p.month_count, p.starts_at, p.ends_at,
@@ -107,8 +125,8 @@ pub async fn sync_credit_periods(
          JOIN billing_order o ON o.id=p.order_id
          JOIN billing_subscription s ON s.id=p.subscription_id
          WHERE p.product=? AND p.owner_kind=? AND p.owner_id=?
-           AND p.revoked_at IS NULL AND o.status='PAID' AND p.starts_at<=?
-           AND (SELECT COUNT(*) FROM billing_credit_period c WHERE c.order_id=p.order_id)<p.month_count
+           AND p.revoked_at IS NULL AND p.credits_complete=0 AND o.status='PAID' AND p.starts_at<=?
+           AND NOT EXISTS (SELECT 1 FROM billing_credit_period c WHERE c.order_id=p.order_id AND c.starts_at<=?4 AND c.expires_at>?4)
          ORDER BY p.starts_at, p.order_id",
         &values,
     )?
@@ -124,6 +142,9 @@ pub async fn sync_credit_periods(
             time_zone: row.billing_time_zone,
         };
         for index in 0..row.month_count {
+            if storage::now() >= deadline {
+                return Ok(());
+            }
             if row.issued & (1 << index) != 0 {
                 continue;
             }
@@ -144,6 +165,7 @@ pub async fn sync_credit_periods(
             Grant {
                 order_id: &row.order_id,
                 month_index: index,
+                last: index + 1 == row.month_count,
                 starts_at,
                 expires_at,
                 amount: row.monthly_credits,
@@ -154,7 +176,7 @@ pub async fn sync_credit_periods(
         }
     }
     if archive_late_grants {
-        archive_due(db, scope, now, request_id).await?;
+        archive_due(db, scope, now, request_id, deadline).await?;
     }
     Ok(())
 }
@@ -178,7 +200,7 @@ impl Grant<'_> {
             id: &audit_id,
             calling_service: SYSTEM,
             actor_user_id: None,
-            operation: "CREDIT_GRANT",
+            operation: "billing.credit.grant",
             target_id: &id,
             product: scope.product,
             owner: scope.owner,
@@ -190,9 +212,9 @@ impl Grant<'_> {
         paid.extend([
             self.order_id.into(),
             self.month_index.into(),
-            number(self.starts_at),
-            number(self.expires_at),
-            number(self.amount),
+            number(self.starts_at)?,
+            number(self.expires_at)?,
+            number(self.amount)?,
             self.order_id.into(),
             self.month_index.into(),
         ]);
@@ -203,14 +225,14 @@ impl Grant<'_> {
         ];
         row.extend(scope.values());
         row.extend([
-            number(self.starts_at),
-            number(self.expires_at),
-            number(self.amount),
-            number(self.amount),
-            number(now),
-            number(now),
+            number(self.starts_at)?,
+            number(self.expires_at)?,
+            number(self.amount)?,
+            number(self.amount)?,
+            number(now)?,
+            number(now)?,
         ]);
-        Ok(vec![
+        let mut batch = vec![
             guard(db,
                   "EXISTS (SELECT 1 FROM billing_order_service_period p JOIN billing_order o ON o.id=p.order_id
                    WHERE p.product=? AND p.owner_kind=? AND p.owner_id=? AND p.order_id=?
@@ -230,7 +252,15 @@ impl Grant<'_> {
                 delta: Delta { granted: self.amount, available: self.amount, ..Delta::default() },
                 reference: Some(self.order_id), actor: None, occurred_at: self.starts_at,
             }.prepare(db, &audit)?,
-        ])
+        ];
+        if self.last {
+            batch.push(bind(
+                db,
+                "UPDATE billing_order_service_period SET credits_complete=1 WHERE order_id=?",
+                &[self.order_id.into()],
+            )?);
+        }
+        Ok(batch)
     }
 
     async fn commit(
@@ -271,19 +301,20 @@ pub(super) async fn period_at(
     scope: &CreditScope<'_>,
     at: i64,
 ) -> Result<Option<CreditPeriod>> {
+    read_period(db, scope, at)?
+        .first(None)
+        .await
+        .map_err(|_| UNAVAILABLE)
+}
+
+pub(super) fn read_period(
+    db: &D1Database,
+    scope: &CreditScope<'_>,
+    at: i64,
+) -> Result<D1PreparedStatement> {
     let mut values = scope.values().to_vec();
-    values.extend([number(at), number(at)]);
-    bind(
-        db,
-        "SELECT id, starts_at, expires_at, granted, available, reserved, consumed, version, status
-          FROM billing_credit_period WHERE product=? AND owner_kind=? AND owner_id=?
-            AND starts_at<=? AND expires_at>? AND status IN ('ACTIVE','EXPIRED')
-          ORDER BY starts_at DESC, id DESC LIMIT 1",
-        &values,
-    )?
-    .first(None)
-    .await
-    .map_err(|_| UNAVAILABLE)
+    values.extend([number(at)?, number(at)?]);
+    bind(db, include_str!("sql/period_at.sql"), &values)
 }
 
 async fn archive_due(
@@ -291,29 +322,26 @@ async fn archive_due(
     scope: &CreditScope<'_>,
     now: i64,
     request_id: &str,
+    deadline: i64,
 ) -> Result<()> {
     let mut values = scope.values().to_vec();
-    values.push(number(now));
-    let rows: Vec<CreditPeriod> = bind(
-        db,
-        "SELECT id, starts_at, expires_at, granted, available, reserved, consumed, version, status
-         FROM billing_credit_period
-         WHERE product=? AND owner_kind=? AND owner_id=? AND status='ACTIVE' AND expires_at<=?
-         ORDER BY expires_at, id",
-        &values,
-    )?
-    .all()
-    .await
-    .map_err(|_| UNAVAILABLE)?
-    .results()
-    .map_err(|_| UNAVAILABLE)?;
+    values.push(number(now)?);
+    let rows: Vec<CreditPeriod> = bind(db, include_str!("sql/archive_due.sql"), &values)?
+        .all()
+        .await
+        .map_err(|_| UNAVAILABLE)?
+        .results()
+        .map_err(|_| UNAVAILABLE)?;
     for mut row in rows {
         for attempt in 0..4 {
+            if storage::now() >= deadline {
+                return Ok(());
+            }
             let batch = archive_batch(db, scope, &row, now, request_id)?;
             match storage::commit(db, batch).await {
                 Ok(_) => break,
                 Err(CommitFailure::GuardRejected) => {
-                    cleanup::release_due_holds(db, scope, now, request_id).await?;
+                    cleanup::release_due_holds(db, scope, now, request_id, deadline).await?;
                     let updated: Option<CreditPeriod> = bind(
                         db,
                         "SELECT id, starts_at, expires_at, granted, available, reserved, consumed, version, status
@@ -350,7 +378,7 @@ fn archive_batch(
         id: &audit_id,
         calling_service: SYSTEM,
         actor_user_id: None,
-        operation: "CREDIT_EXPIRE",
+        operation: "billing.credit.expire",
         target_id: &row.id,
         product: scope.product,
         owner: scope.owner,
@@ -359,29 +387,55 @@ fn archive_batch(
         created_at: now,
     };
     let condition = "id=? AND version=? AND status='ACTIVE' AND expires_at<=?";
-    let version = [row.id.as_str().into(), number(row.version), number(now)];
+    let version = [row.id.as_str().into(), number(row.version)?, number(now)?];
     Ok(vec![
-        guard(db, &format!("EXISTS (
+        guard(
+            db,
+            &format!(
+                "EXISTS (
             SELECT 1 FROM billing_credit_period WHERE {condition}
               AND NOT EXISTS (SELECT 1 FROM billing_credit_hold h
                 WHERE h.credit_period_id=billing_credit_period.id AND h.status='OPEN'
                   AND h.expires_at<billing_credit_period.expires_at)
-        )"), &version)?,
-        bind(db,
-             "UPDATE billing_credit_hold
-              SET expired=expired+reserved, reserved=0, status='EXPIRED', updated_at=?, version=version+1
-              WHERE credit_period_id=? AND status='OPEN'",
-             &[number(now), row.id.as_str().into()])?,
-        bind(db,
-             &format!("UPDATE billing_credit_period
+        )"
+            ),
+            &version,
+        )?,
+        bind(
+            db,
+            include_str!("sql/archive_holds.sql"),
+            &[number(now)?, row.id.as_str().into()],
+        )?,
+        bind(
+            db,
+            &format!(
+                "UPDATE billing_credit_period
               SET expired=expired+available+reserved, available=0, reserved=0,
-                  status='EXPIRED', updated_at=?, version=version+1 WHERE {condition}"),
-             &[number(now), version[0].clone(), version[1].clone(), version[2].clone()])?,
+                  status='EXPIRED', updated_at=?, version=version+1 WHERE {condition}"
+            ),
+            &[
+                number(now)?,
+                version[0].clone(),
+                version[1].clone(),
+                version[2].clone(),
+            ],
+        )?,
         audit.prepare(db).map_err(|_| UNAVAILABLE)?,
         LedgerEntry {
-            id: &new_id(), period_id: &row.id, hold_id: None, kind: "EXPIRE",
-            delta: Delta { available: -row.available, reserved: -row.reserved, expired, ..Delta::default() },
-            reference: None, actor: None, occurred_at: row.expires_at,
-        }.prepare(db, &audit)?,
+            id: &new_id(),
+            period_id: &row.id,
+            hold_id: None,
+            kind: "EXPIRE",
+            delta: Delta {
+                available: -row.available,
+                reserved: -row.reserved,
+                expired,
+                ..Delta::default()
+            },
+            reference: None,
+            actor: None,
+            occurred_at: row.expires_at,
+        }
+        .prepare(db, &audit)?,
     ])
 }

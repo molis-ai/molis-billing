@@ -8,9 +8,21 @@ function isPublic(path) {
   )
 }
 
-function notFound(request) {
+function notFound(request, env) {
+  const started = Date.now()
   const incomingId = request.headers.get('X-Request-Id') ?? ''
   const requestId = /^[A-Za-z0-9_.-]{1,128}$/u.test(incomingId) ? incomingId : crypto.randomUUID()
+  console.log(
+    JSON.stringify({
+      env: env.ENVIRONMENT_ID,
+      requestId,
+      route: 'not_found',
+      method: request.method,
+      status: 404,
+      errorCode: 'NOT_FOUND',
+      durationMs: Date.now() - started,
+    }),
+  )
   return Response.json(
     { error: { code: 'NOT_FOUND', message: 'Route not found' }, requestId },
     {
@@ -37,9 +49,9 @@ export default class extends BillingWorker {
       url.origin === env.BILLING_ORIGIN
     if (isPublic(url.pathname)) {
       // Auth's browser proxy uses this server-only header in local development, too.
-      if (request.headers.has('X-Molis-Internal-Secret')) return notFound(request)
+      if (request.headers.has('X-Molis-Internal-Secret')) return notFound(request, this.env)
     } else if (!local) {
-      return notFound(request)
+      return notFound(request, this.env)
     }
     return super.fetch(request)
   }
@@ -47,7 +59,7 @@ export default class extends BillingWorker {
 
 export class BillingInternal extends BillingWorker {
   fetch(request) {
-    if (isPublic(new URL(request.url).pathname)) return notFound(request)
+    if (isPublic(new URL(request.url).pathname)) return notFound(request, this.env)
     return super.fetch(request)
   }
 }

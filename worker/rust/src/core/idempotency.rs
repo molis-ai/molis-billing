@@ -1,22 +1,17 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
-use wasm_bindgen::prelude::*;
+use sha2::{Digest, Sha256};
+use wasm_bindgen::JsValue;
 use worker::{D1Database, D1PreparedStatement, Request, Result};
 
 use crate::{
-    http::{ApiError, valid_id},
-    identity::Owner,
-    storage::integer,
+    core::http::{ApiError, valid_id},
+    core::identity::Owner,
+    core::storage::integer,
 };
 
 const KEY_QUERY: &str = "calling_service = ? AND actor_user_id = ? AND operation = ?
     AND product = ? AND owner_kind = ? AND owner_id = ? AND idempotency_key = ?";
-
-#[wasm_bindgen(module = "/src/runtime/foundation.js")]
-extern "C" {
-    #[wasm_bindgen(catch, js_name = sha256)]
-    async fn sha256(input: &str) -> std::result::Result<Vec<u8>, JsValue>;
-}
 
 pub struct ReceiptKey<'a> {
     pub calling_service: &'a str,
@@ -81,7 +76,7 @@ impl ReceiptKey<'_> {
         .map(JsValue::from_str)
     }
 
-    pub async fn request_hash(&self, target: &str, parameters: &Value) -> Result<String> {
+    pub fn request_hash(&self, target: &str, parameters: &Value) -> String {
         digest(&json!([
             self.calling_service,
             self.actor_user_id,
@@ -91,7 +86,21 @@ impl ReceiptKey<'_> {
             self.owner,
             parameters
         ]))
-        .await
+    }
+
+    pub fn read(
+        &self,
+        db: &D1Database,
+        now: i64,
+    ) -> std::result::Result<D1PreparedStatement, ApiError> {
+        let mut values = self.values().to_vec();
+        values.push(integer(now).map_err(|_| ApiError::BILLING_UNAVAILABLE)?);
+        db.prepare(format!(
+            "SELECT request_hash, response_status, response_json
+             FROM billing_idempotency_receipt WHERE {KEY_QUERY} AND expires_at > ?"
+        ))
+        .bind(&values)
+        .map_err(|_| ApiError::BILLING_UNAVAILABLE)
     }
 
     pub async fn lookup(
@@ -100,34 +109,30 @@ impl ReceiptKey<'_> {
         now: i64,
         expected_hash: &str,
     ) -> std::result::Result<Option<Receipt>, ApiError> {
-        let mut values = self.values().to_vec();
-        values.push(integer(now).map_err(|_| ApiError::BILLING_UNAVAILABLE)?);
-        let receipt: Option<Receipt> = db
-            .prepare(format!(
-                "SELECT request_hash, response_status, response_json
-             FROM billing_idempotency_receipt WHERE {KEY_QUERY} AND expires_at > ?"
-            ))
-            .bind(&values)
-            .map_err(|_| ApiError::BILLING_UNAVAILABLE)?
+        let receipt = self
+            .read(db, now)?
             .first(None)
             .await
             .map_err(|_| ApiError::BILLING_UNAVAILABLE)?;
-        if receipt
-            .as_ref()
-            .is_some_and(|row| row.request_hash != expected_hash)
-        {
-            return Err(ApiError::IDEMPOTENCY_CONFLICT);
-        }
-        Ok(receipt)
+        Receipt::verify(receipt, expected_hash)
     }
 
     /// Append both statements to the business batch after the corresponding audit insert.
     /// A live receipt with the same key aborts the batch; the caller should then re-read it.
-    pub fn success(
+    pub async fn commit(
         &self,
         db: &D1Database,
+        mut batch: Vec<D1PreparedStatement>,
         result: Success<'_>,
-    ) -> Result<[D1PreparedStatement; 2]> {
+    ) -> std::result::Result<(), super::storage::CommitFailure> {
+        batch.extend(
+            self.success(db, result)
+                .map_err(|_| super::storage::CommitFailure::Database)?,
+        );
+        super::storage::commit(db, batch).await.map(|_| ())
+    }
+
+    fn success(&self, db: &D1Database, result: Success<'_>) -> Result<[D1PreparedStatement; 2]> {
         let mut values = self.values().to_vec();
         values.push(integer(result.created_at)?);
         let expire = db
@@ -170,12 +175,42 @@ impl Audit<'_> {
     }
 }
 
-pub async fn digest(value: &Value) -> Result<String> {
-    // Normalize map ordering even if a later dependency enables serde_json's preserve_order.
+pub fn digest(value: &Value) -> String {
     let mut canonical = value.clone();
     canonical.sort_all_objects();
-    let bytes = sha256(&canonical.to_string())
-        .await
-        .map_err(worker::Error::from)?;
-    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+    format!("{:x}", Sha256::digest(canonical.to_string().as_bytes()))
+}
+
+impl Receipt {
+    pub fn verify(
+        receipt: Option<Self>,
+        expected_hash: &str,
+    ) -> std::result::Result<Option<Self>, ApiError> {
+        if receipt
+            .as_ref()
+            .is_some_and(|row| row.request_hash != expected_hash)
+        {
+            return Err(ApiError::IDEMPOTENCY_CONFLICT);
+        }
+        Ok(receipt)
+    }
+}
+
+pub async fn purge_expired(
+    db: &D1Database,
+    now: i64,
+    limit: u32,
+) -> std::result::Result<(), ApiError> {
+    super::storage::prepare(
+        db,
+        "DELETE FROM billing_idempotency_receipt WHERE rowid IN (
+            SELECT rowid FROM billing_idempotency_receipt WHERE expires_at<=?
+            ORDER BY expires_at, rowid LIMIT ?
+         )",
+        &[super::storage::number(now)?, limit.into()],
+    )?
+    .run()
+    .await
+    .map_err(|_| ApiError::BILLING_UNAVAILABLE)?;
+    Ok(())
 }

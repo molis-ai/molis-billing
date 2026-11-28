@@ -1,6 +1,6 @@
 use worker::Request;
 
-use crate::http::{ApiError, valid_id};
+use crate::core::http::{ApiError, valid_id};
 
 pub struct Page {
     pub limit: u32,
@@ -14,6 +14,25 @@ pub struct Cursor {
 }
 
 impl Page {
+    pub fn paginate_rows<T>(
+        &self,
+        rows: &mut Vec<T>,
+        cursor: impl FnOnce(&T) -> (i64, &str),
+    ) -> Option<String> {
+        if rows.len() <= self.limit as usize {
+            return None;
+        }
+        rows.truncate(self.limit as usize);
+        rows.last().map(|row| {
+            let (created_at, id) = cursor(row);
+            Cursor {
+                created_at,
+                id: id.to_owned(),
+            }
+            .encode()
+        })
+    }
+
     pub fn from_request(request: &Request) -> Result<Self, ApiError> {
         let url = request.url().map_err(|_| ApiError::INVALID_REQUEST)?;
         let mut limit = None;

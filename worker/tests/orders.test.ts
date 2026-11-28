@@ -19,6 +19,7 @@ type Scope = {
   key?: string | null
   actor?: string
   tenant?: string
+  failAfterGrant?: boolean
   requestId?: string
 }
 
@@ -40,7 +41,6 @@ async function setup(t: TestContext, environment = 'test', withWebhookSecret = t
     bindings: {
       MOLIS_ENVIRONMENT: environment,
       MOLIS_INTERNAL_SECRET: internal,
-      BILLING_CREDIT_FIXTURE: '1',
       ...(withWebhookSecret && { MOLIS_MOCK_WEBHOOK_SECRET: signing }),
     },
     auth: async (request: Request) => {
@@ -90,20 +90,19 @@ async function setup(t: TestContext, environment = 'test', withWebhookSecret = t
     return caller.fetch(url, {
       method,
       headers: {
-        'X-Order-Fixture': '1',
         'X-Molis-Internal-Secret': internal,
         Authorization: `Bearer ${scope.actor ?? 'admin-1'}`,
         ...(scope.now !== undefined && {
-          'X-Order-Fixture-Time': String(scope.now),
-          'X-Fixture-Now': String(scope.now),
+          'X-Test-Now': String(scope.now),
         }),
         ...(scope.commitTime !== undefined && {
-          'X-Order-Fixture-Commit-Time': String(scope.commitTime),
+          'X-Test-Commit-Now': String(scope.commitTime),
         }),
         ...(method === 'POST' &&
           scope.key !== null && {
             'Idempotency-Key': scope.key ?? `request-${++keySequence}`,
           }),
+        ...(scope.failAfterGrant && { 'X-Test-Fail-After-Grant': '1' }),
         ...(scope.requestId && { 'X-Request-Id': scope.requestId }),
         ...(body && { 'Content-Type': 'application/json' }),
       },
@@ -147,8 +146,7 @@ async function setup(t: TestContext, environment = 'test', withWebhookSecret = t
     return runtime.dispatchFetch(origin + base + `/webhooks/${provider}`, {
       method: 'POST',
       headers: {
-        'X-Order-Fixture': '1',
-        'X-Order-Fixture-Time': String(now),
+        'X-Test-Now': String(now),
         'X-Molis-Payment-Signature':
           signature ?? createHmac('sha256', signing).update(body).digest('hex'),
       },
@@ -157,9 +155,9 @@ async function setup(t: TestContext, environment = 'test', withWebhookSecret = t
   }
 
   function sweep(now: number) {
-    return runtime.dispatchFetch(origin + base + '/webhooks/order-fixture-expire', {
+    return caller.fetch(origin + '/fixture/orders/expire', {
       method: 'POST',
-      headers: { 'X-Order-Fixture': '1', 'X-Order-Fixture-Time': String(now) },
+      headers: { 'X-Molis-Internal-Secret': internal, 'X-Test-Now': String(now) },
     })
   }
 
@@ -271,7 +269,7 @@ if (process.env.BILLING_ORDER_TEST_NO_MOCK === '1') {
           ...f.internalHeaders,
           'Content-Type': 'application/json',
           'Idempotency-Key': 'audit-usage',
-          'X-Fixture-Now': String(now),
+          'X-Test-Now': String(now),
           'X-Request-Id': 'audit-usage',
         },
         body: JSON.stringify({
@@ -352,7 +350,7 @@ if (process.env.BILLING_ORDER_TEST_NO_MOCK === '1') {
     assert.ok(
       collected.some(
         (item) =>
-          item.operation === 'order.pay' &&
+          item.operation === 'billing.order.pay' &&
           item.targetId === first.id &&
           item.requestId === 'audit-payment',
       ),
@@ -360,18 +358,20 @@ if (process.env.BILLING_ORDER_TEST_NO_MOCK === '1') {
     assert.ok(
       collected.some(
         (item) =>
-          item.operation === 'order.refund' &&
+          item.operation === 'billing.order.refund' &&
           item.targetId === renewal.id &&
           item.requestId === 'audit-refund',
       ),
     )
     assert.ok(
-      collected.some((item) => item.operation === 'CREDIT_GRANT' && item.actorUserId === null),
+      collected.some(
+        (item) => item.operation === 'billing.credit.grant' && item.actorUserId === null,
+      ),
     )
     assert.ok(
       collected.some(
         (item) =>
-          item.operation === 'CREDIT_CONSUME' &&
+          item.operation === 'billing.credit.consume' &&
           item.actorUserId === 'user-fixture' &&
           item.callingService === 'work-fixture',
       ),
@@ -412,7 +412,7 @@ if (process.env.BILLING_ORDER_TEST_NO_MOCK === '1') {
     assert.equal((await data(f.call('/credits/balance', { now }))).available, 0)
 
     await error(
-      f.pay(pending, { now: paidAt, key: 'pay-once', requestId: 'fixture-fail-credit' }),
+      f.pay(pending, { now: paidAt, key: 'pay-once', failAfterGrant: true }),
       503,
       'BILLING_UNAVAILABLE',
     )
@@ -561,7 +561,7 @@ if (process.env.BILLING_ORDER_TEST_NO_MOCK === '1') {
     )
     assert.equal(
       await f.db
-        .prepare("SELECT COUNT(*) n FROM billing_audit WHERE operation='order.expire'")
+        .prepare("SELECT COUNT(*) n FROM billing_audit WHERE operation='billing.order.expire'")
         .first('n'),
       1,
     )

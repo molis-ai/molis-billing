@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare'
 import { compatibilityDate } from './environment.mjs'
@@ -7,6 +8,7 @@ const rustPath = (relative) => fileURLToPath(new URL(relative, rustDirectory))
 
 export function startLocalRuntime({
   database = true,
+  meter = false,
   bindings = {},
   auth,
   triggerHandlers = false,
@@ -18,6 +20,18 @@ export function startLocalRuntime({
           name: 'billing',
           modulesRoot: rustPath('.'),
           modules: [
+            ...(meter
+              ? [
+                  {
+                    type: 'ESModule',
+                    path: rustPath('meter.js'),
+                    contents: readFileSync(
+                      new URL('../tests/d1-meter.js', import.meta.url),
+                      'utf8',
+                    ),
+                  },
+                ]
+              : []),
             { type: 'ESModule', path: rustPath('src/runtime/entrypoint.js') },
             { type: 'ESModule', path: rustPath('build/index.js') },
             { type: 'CompiledWasm', path: rustPath('build/index_bg.wasm') },

@@ -2,10 +2,30 @@ use super::*;
 
 const NAME: &str = "mock";
 
-#[wasm_bindgen(module = "/src/runtime/mock-payment.js")]
-extern "C" {
-    #[wasm_bindgen(catch, js_name = verifyMockSignature)]
-    async fn verify_signature(secret: &str, body: &[u8], header: &str) -> Result<bool, JsValue>;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+
+fn verify_signature(secret: &str, body: &[u8], header: &str) -> bool {
+    if header.len() != 64 {
+        return false;
+    }
+    let digit = |byte| match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    };
+    let mut provided = [0; 32];
+    for (pair, output) in header.as_bytes().chunks_exact(2).zip(&mut provided) {
+        let (Some(high), Some(low)) = (digit(pair[0]), digit(pair[1])) else {
+            return false;
+        };
+        *output = high << 4 | low;
+    }
+    let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(secret.as_bytes()) else {
+        return false;
+    };
+    mac.update(body);
+    mac.verify_slice(&provided).is_ok()
 }
 
 pub(super) struct Adapter;
@@ -20,19 +40,12 @@ impl PaymentProvider for Adapter {
         NAME
     }
 
-    fn confirm(&self, order: &Order, kind: Kind) -> Event {
+    fn identifiers(&self, id: &str, kind: Kind) -> (String, String) {
         let operation = match kind {
             Kind::Payment => "pay",
             Kind::Refund => "refund",
         };
-        Event {
-            event_id: format!("{operation}.{}", order.id),
-            kind,
-            payment_id: payment_id(&order.id),
-            order_id: order.id.clone(),
-            amount_minor: order.amount_minor,
-            currency: order.currency.clone(),
-        }
+        (format!("{operation}.{id}"), payment_id(id))
     }
 
     fn verify<'a>(&self, request: &'a mut Request, env: &'a Env) -> Verification<'a> {
@@ -64,10 +77,7 @@ async fn verify_request(request: &mut Request, env: &Env) -> ApiResult<Event> {
     if bytes.len() > 4096 {
         return Err(ApiError::INVALID_REQUEST);
     }
-    if !verify_signature(&secret, &bytes, &signature)
-        .await
-        .map_err(|_| ApiError::BILLING_UNAVAILABLE)?
-    {
+    if !verify_signature(&secret, &bytes, &signature) {
         return Err(ApiError::FORBIDDEN);
     }
     serde_json::from_slice(&bytes).map_err(|_| ApiError::INVALID_REQUEST)

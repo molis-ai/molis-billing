@@ -71,9 +71,9 @@ function billingHeaders(credential = 'valid') {
 const catalogPath = '/api/v1/catalog/plans'
 const teamQuery = '?ownerKind=TENANT&ownerId=team-1'
 
-test('A01 fresh and seeded 0002 D1 upgrade, repeat initialization and exact order snapshots', async (t) => {
+test('A01 single baseline cold start, repeat initialization and exact order snapshots', async (t) => {
   for (const existing of [false, true]) {
-    await t.test(existing ? 'existing 0002 D1' : 'fresh D1', async (context) => {
+    await t.test(existing ? 'pre-seeded baseline' : 'fresh D1', async (context) => {
       const fixture = authFixture()
       const runtime = startLocalRuntime({
         bindings: { MOLIS_ENVIRONMENT: 'test', MOLIS_INTERNAL_SECRET: secret },
@@ -82,20 +82,8 @@ test('A01 fresh and seeded 0002 D1 upgrade, repeat initialization and exact orde
       context.after(() => runtime.dispose())
       const caller = await runtime.getWorker('caller')
       const db = await runtime.getD1Database('DB', 'billing')
-      if (existing) {
-        await applySchema(db, 1, 2)
-        await db
-          .prepare(
-            `INSERT INTO billing_plan_version VALUES
-              (?, 1, 'WORK', 'USER', '个人测试套餐', 'CNY', 1000, 10000, 100),
-              (?, 1, 'WORK', 'TENANT', '团队测试套餐', 'CNY', 3000, 30000, 500)`,
-          )
-          .bind(personal, team)
-          .run()
-        await applySchema(db, 3)
-      } else {
-        await applySchema(db)
-      }
+      await applySchema(db)
+      if (existing) await seedPlans(db)
       await seedPlans(db)
       await seedPlans(db)
       assert.equal(await db.prepare('SELECT COUNT(*) AS n FROM billing_plan').first('n'), 2)
@@ -372,29 +360,67 @@ test('a D1 guard miss rolls back preceding audit writes, while one concurrent wr
   )
 })
 
-test('the Auth client sends the introspection request over the exact dev loopback only', async (t) => {
+test('the Auth client sends the subject verification request over the exact dev loopback only', async (t) => {
   const network = t.mock.method(globalThis, 'fetch', async (request: Request) => {
-    assert.equal(request.url, 'http://127.0.0.1:8787/internal/v1/sessions/introspect')
+    assert.equal(request.url, 'http://127.0.0.1:8787/internal/v1/subjects/verify')
     assert.equal(request.redirect, 'manual')
     assert.equal(request.headers.get(header), secret)
     assert.equal(request.headers.get('Authorization'), 'Bearer fixture')
-    assert.equal(request.headers.get('X-Request-Id'), 'fixture-introspect')
+    assert.equal(request.headers.get('X-Request-Id'), 'fixture-verify')
     assert.deepEqual(await request.json(), {})
     return Response.json({ data: { userId: 'user-1' } })
   })
   const vars = { AUTH_ORIGIN: 'http://127.0.0.1:8787', MOLIS_INTERNAL_SECRET: secret }
-  const introspect = (env: typeof vars & { MOLIS_ENVIRONMENT: string }) =>
-    authFetch(env, '/internal/v1/sessions/introspect', 'Bearer fixture', '{}', 'fixture-introspect')
-  assert.deepEqual(JSON.parse(await introspect({ ...vars, MOLIS_ENVIRONMENT: 'dev' })), {
+  const verify = (env: typeof vars & { MOLIS_ENVIRONMENT: string }) =>
+    authFetch(env, '/internal/v1/subjects/verify', 'Bearer fixture', '{}', 'fixture-verify')
+  assert.deepEqual(JSON.parse(await verify({ ...vars, MOLIS_ENVIRONMENT: 'dev' })), {
     status: 200,
     result: { data: { userId: 'user-1' } },
   })
   for (const env of ['test', 'prod']) {
-    await assert.rejects(introspect({ ...vars, MOLIS_ENVIRONMENT: env }), /transport unavailable/u)
+    await assert.rejects(verify({ ...vars, MOLIS_ENVIRONMENT: env }), /transport unavailable/u)
   }
   await assert.rejects(
-    introspect({ ...vars, MOLIS_ENVIRONMENT: 'dev', AUTH_ORIGIN: 'http://127.0.0.1:8789' }),
+    verify({ ...vars, MOLIS_ENVIRONMENT: 'dev', AUTH_ORIGIN: 'http://127.0.0.1:8789' }),
     /transport unavailable/u,
   )
   assert.equal(network.mock.callCount(), 1)
+})
+
+test('credit hot paths and maintenance use bounded index searches on the baseline', async (t) => {
+  const runtime = startLocalRuntime()
+  t.after(() => runtime.dispose())
+  const db = await runtime.getD1Database('DB', 'billing')
+  await applySchema(db)
+  const { readFile } = await import('node:fs/promises')
+  for (const [query, bindings, indexes] of [
+    ['consume_expired', 2, ['billing_credit_hold_period']],
+    ['archive_holds', 2, ['billing_credit_hold_period']],
+    ['release_due_holds', 4, ['billing_credit_hold_subject_open']],
+    ['period_at', 5, ['billing_credit_period_subject']],
+    ['archive_due', 4, ['billing_credit_period_subject_active']],
+    [
+      'cleanup_due',
+      2,
+      [
+        'billing_credit_period_expiry',
+        'billing_credit_hold_expiry',
+        'billing_service_period_pending_credits',
+      ],
+    ],
+  ] as const) {
+    const sql = await readFile(
+      new URL('../rust/src/credit/sql/' + query + '.sql', import.meta.url),
+      'utf8',
+    )
+    const result = await db
+      .prepare('EXPLAIN QUERY PLAN ' + sql)
+      .bind(...Array(bindings).fill(1))
+      .all()
+    const plan = result.results.map((row) => row.detail).join('\n')
+    assert.doesNotMatch(plan, /\bSCAN\b|billing_service_period_active\b/)
+    if (query !== 'cleanup_due') assert.doesNotMatch(plan, /TEMP B-TREE/)
+    for (const index of indexes) assert.ok(plan.includes(index), plan)
+    console.log('QUERY_PLAN', query, plan)
+  }
 })

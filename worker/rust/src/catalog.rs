@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
-use worker::D1Database;
 use worker::d1::D1Type;
+use worker::{D1Database, D1PreparedStatement};
 
-use crate::{calendar::Interval, http::ApiError, identity::OwnerKind};
+use crate::{core::calendar::Interval, core::http::ApiError, core::identity::OwnerKind};
 
 const QUOTES: &str = "SELECT p.plan_id, p.current_version AS plan_version,
     p.product, p.owner_kind, v.name, v.currency, v.monthly_price_minor,
@@ -64,18 +64,30 @@ pub async fn find_quote(
     owner_kind: OwnerKind,
     plan_id: &str,
 ) -> Result<Quote, ApiError> {
-    let quote: Quote = db
-        .prepare(format!("{QUOTES} AND p.plan_id = ?"))
+    let quote = read_quote(db, product, owner_kind, plan_id)?
+        .first(None)
+        .await
+        .map_err(|_| ApiError::BILLING_UNAVAILABLE)?;
+    require_quote(quote)
+}
+
+pub fn read_quote(
+    db: &D1Database,
+    product: &str,
+    owner_kind: OwnerKind,
+    plan_id: &str,
+) -> Result<D1PreparedStatement, ApiError> {
+    db.prepare(format!("{QUOTES} AND p.plan_id = ?"))
         .bind_refs(&[
             D1Type::Text(product),
             D1Type::Text(owner_kind.as_str()),
             D1Type::Text(plan_id),
         ])
-        .map_err(|_| ApiError::BILLING_UNAVAILABLE)?
-        .first(None)
-        .await
-        .map_err(|_| ApiError::BILLING_UNAVAILABLE)?
-        .ok_or(ApiError::NOT_FOUND)?;
+        .map_err(|_| ApiError::BILLING_UNAVAILABLE)
+}
+
+pub fn require_quote(quote: Option<Quote>) -> Result<Quote, ApiError> {
+    let quote = quote.ok_or(ApiError::NOT_FOUND)?;
     match quote.sale_status.as_str() {
         "ON_SALE" => Ok(quote),
         "DISCONTINUED" => Err(ApiError::PLAN_DISCONTINUED),

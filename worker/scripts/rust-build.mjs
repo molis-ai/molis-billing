@@ -14,7 +14,7 @@ const binary = join(
 if (!existsSync(binary)) throw new Error('Run npm run setup to install worker-build.')
 const args = process.argv.slice(2)
 const cargoArgs = ['--locked']
-const fixtureFeatures = ['order-fixture', 'credit-fixture']
+const fixtureFeatures = ['test-fixture']
 if (args.includes('--production')) {
   if (args.length !== 1) throw new Error('--production must be used without fixture options.')
   cargoArgs.push('--no-default-features')

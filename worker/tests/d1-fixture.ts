@@ -21,18 +21,9 @@ export async function sqlFile(file: string) {
 
 type Database = Awaited<ReturnType<import('miniflare').Miniflare['getD1Database']>>
 
-export async function applySchema(db: Database, from = 1, to = 5) {
-  const files = [
-    '0001_init.sql',
-    '0002_plan_catalog.sql',
-    '0003_billing_plan.sql',
-    '0004_billing_orders.sql',
-    '0005_billing_credits.sql',
-  ]
-  for (const file of files.slice(from - 1, to)) {
-    const statements = await sqlFile(`migrations/${file}`)
-    await db.batch(statements.map((sql) => db.prepare(sql)))
-  }
+export async function applySchema(db: Database) {
+  const statements = await sqlFile('migrations/0001_billing_baseline.sql')
+  await db.batch(statements.map((sql) => db.prepare(sql)))
 }
 
 export async function seedPlans(db: Database) {
