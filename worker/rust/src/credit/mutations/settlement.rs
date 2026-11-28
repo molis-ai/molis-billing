@@ -1,4 +1,14 @@
-use super::*;
+use crate::core::{
+    http::{ApiError, ApiResult},
+    storage::{integer, prepare},
+};
+
+use super::super::model::{CreditPeriod, Delta};
+use super::{
+    holds::{HoldRow, HoldStatus},
+    runner::Write,
+    types::{INSUFFICIENT, Mutation, Segment, update_period},
+};
 
 impl Write<'_> {
     pub(super) async fn consume(
@@ -6,21 +16,21 @@ impl Write<'_> {
         at: i64,
         amount: i64,
         period: Option<CreditPeriod>,
-    ) -> Result<Mutation> {
+    ) -> ApiResult<Mutation> {
         let period = period.ok_or(INSUFFICIENT)?;
         let mut delta = Delta {
             consumed: amount,
             ..Delta::default()
         };
         if period.status == "EXPIRED" {
-            let available = bind(
+            let available = prepare(
                 self.db,
-                include_str!("sql/consume_expired.sql"),
-                &[period.id.as_str().into(), number(period.version)?],
+                include_str!("../sql/consume_expired.sql"),
+                &[period.id.as_str().into(), integer(period.version)?],
             )?
             .first::<i64>(Some("available"))
             .await
-            .map_err(|_| UNAVAILABLE)?
+            .map_err(|_| ApiError::BILLING_UNAVAILABLE)?
             .ok_or(ApiError::VERSION_CONFLICT)?;
             if available < amount {
                 return Err(INSUFFICIENT);
@@ -45,10 +55,10 @@ impl Write<'_> {
         segment: Segment,
         held_period: Option<CreditPeriod>,
         segment_period: Option<CreditPeriod>,
-    ) -> Result<Mutation> {
+    ) -> ApiResult<Mutation> {
         let period = held_period.ok_or(INSUFFICIENT)?;
         if period.id != row.credit_period_id {
-            return Err(UNAVAILABLE);
+            return Err(ApiError::BILLING_UNAVAILABLE);
         }
         if segment.occurred_at >= period.expires_at {
             if row.expires_at < period.expires_at {

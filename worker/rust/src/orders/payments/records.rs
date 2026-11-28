@@ -1,7 +1,19 @@
-use super::*;
+use serde::Deserialize;
+use serde_json::json;
+use wasm_bindgen::JsValue;
+use worker::{D1Database, D1PreparedStatement};
+
+use crate::core::{
+    http::{ApiError, ApiReply, ApiResult},
+    idempotency,
+    storage::{self, db_result, integer, prepare},
+};
+
+use super::super::{model::Status, service::UserWrite};
+use super::processor::{Event, Kind};
 #[derive(Deserialize)]
 pub(super) struct StoredEvent {
-    pub(super) request_hash: String,
+    request_hash: String,
     pub(super) response_json: String,
 }
 
@@ -53,7 +65,7 @@ impl<'a> PaymentEvent<'a> {
         &self,
         result: &worker::D1Result,
         status: Status,
-    ) -> ApiResult<Option<Reply>> {
+    ) -> ApiResult<Option<ApiReply>> {
         let already_applied = match self.event.kind {
             Kind::Payment => matches!(status, Status::Paid | Status::Refunded),
             Kind::Refund => status == Status::Refunded,
@@ -66,7 +78,7 @@ impl<'a> PaymentEvent<'a> {
             response_json: String,
         }
         let body: Original = storage::first_row(result)?.ok_or(ApiError::BILLING_UNAVAILABLE)?;
-        Reply::stored(200, &body.response_json).map(Some)
+        ApiReply::stored(200, &body.response_json).map(Some)
     }
 
     pub(super) async fn recover(
@@ -74,13 +86,13 @@ impl<'a> PaymentEvent<'a> {
         db: &D1Database,
         write: Option<&UserWrite<'_>>,
         now: i64,
-    ) -> ApiResult<Option<Reply>> {
+    ) -> ApiResult<Option<ApiReply>> {
         if let Some(write) = write {
             write.replay(db, now).await
         } else {
             self.lookup(db)
                 .await?
-                .map(|row| Reply::stored(200, &row.response_json))
+                .map(|row| ApiReply::stored(200, &row.response_json))
                 .transpose()
         }
     }
@@ -88,7 +100,7 @@ impl<'a> PaymentEvent<'a> {
     pub(super) fn insert(
         &self,
         db: &D1Database,
-        reply: &Reply,
+        reply: &ApiReply,
         audit_id: &str,
         now: i64,
     ) -> ApiResult<D1PreparedStatement> {
@@ -104,13 +116,13 @@ impl<'a> PaymentEvent<'a> {
                 event.kind.as_str().into(),
                 event.payment_id.as_str().into(),
                 event.order_id.as_str().into(),
-                number(event.amount_minor)?,
+                integer(event.amount_minor)?,
                 event.currency.as_str().into(),
                 self.hash.as_str().into(),
                 JsValue::from_str(&reply.body.to_string()),
                 audit_id.into(),
-                number(now)?,
-                number(now)?,
+                integer(now)?,
+                integer(now)?,
             ],
         )
     }

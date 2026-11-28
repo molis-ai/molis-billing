@@ -61,7 +61,20 @@ Billing 每页都向 Auth 复核会话和平台 `AUDIT_READ`。Auth 授权端须
 
 ## Billing 模块
 
-- `worker/rust/src/app.rs` 集中匹配公开探针、用户账务和内部账务路由，并在分发前校验相应通道。请求上下文统一传递请求 ID 和处理时间。`core/` 提供 HTTP、身份、D1、幂等、分页和日历实现。`orders/payments/` 管理支付和退款，`credit/` 管理额度，`maintenance/` 执行定时清理。
+工作代码位于 `worker/rust/src/`。各目录的 `mod.rs` 声明子模块并重导出入口。
+
+| 路径 | 职责 |
+| --- | --- |
+| `lib.rs`、`app.rs` | Worker 请求和定时入口、路由、请求上下文、响应与日志 |
+| `core/` | HTTP、身份、D1、幂等、分页、日历与就绪检查 |
+| `audit/query.rs`、`catalog/repository.rs` | 审计分页、套餐目录与报价 |
+| `orders/service.rs`、`orders/model.rs`、`orders/payments/` | 下单、订单与订阅数据、支付和退款 |
+| `credit/api.rs`、`credit/model.rs`、`credit/snapshot.rs`、`credit/periods.rs`、`credit/cleanup.rs` | 余额、流水、额度周期与定期清理 |
+| `credit/mutations/`、`credit/sql/` | 预扣、释放、结算及查询计划验收共用的 SQL |
+| `maintenance/runner.rs` | 定时维护编排、批量上限与运行时限 |
+| `testing/hooks.rs`、`testing/credit_fixture.rs` | `test-fixture` 构建专用的路由、时钟与故障注入 |
+| `runtime/` | Worker 绑定与 JS 运行时桥接 |
+
 - `identity::authorize_user` 对目标调用 subjects/verify，并执行 `UserAccess::Read` / `Manage`。`VerifiedUser::ledger_actor_filter` 提供成员可见性过滤所需的 actor。在服务绑定缺失或密钥缺失时封闭失败。
 - `audit::handle` 在私有入口校验共享密钥，经 `identity::authorize_platform_audit` 检查平台权限后使用 `billing_audit_page` 索引读取分页。
 - `catalog::find_quote` 供订单节点查当前在售版本。创建订单在同一批次复核 current_version/sale_status，按该版本冻结 amount_minor、currency、monthly_credits、interval。支付后继续按已冻结版本履约。

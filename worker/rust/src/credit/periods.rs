@@ -2,37 +2,25 @@ use serde::Deserialize;
 use serde_json::json;
 use worker::{D1Database, D1PreparedStatement};
 
+use crate::core::{
+    calendar::{Anchor, Period, boundary_at},
+    http::{ApiError, ApiResult, generated_id as new_id},
+    idempotency::Audit,
+    storage::{self, CommitFailure, guard, integer, prepare},
+};
+
 use super::{
-    CreditScope, Delta, LedgerEntry, Result, SYSTEM, UNAVAILABLE, bind, cleanup, commit_failure,
-    guard, new_id, number,
-};
-use crate::{
-    core::calendar::{Anchor, Period, boundary_at},
-    core::http::ApiError,
-    core::idempotency::Audit,
-    core::storage::{self, CommitFailure},
+    cleanup,
+    model::{CreditPeriod, CreditScope, Delta, LedgerEntry, SYSTEM},
 };
 
-#[derive(Deserialize)]
-pub(super) struct CreditPeriod {
-    pub id: String,
-    pub starts_at: i64,
-    pub expires_at: i64,
-    pub granted: i64,
-    pub available: i64,
-    pub reserved: i64,
-    pub consumed: i64,
-    pub version: i64,
-    pub status: String,
-}
-
-pub struct FirstMonthGrant<'a> {
-    pub order_id: &'a str,
-    pub anchor: &'a Anchor,
-    pub period: &'a Period,
-    pub monthly_credits: i64,
-    pub paid_at: i64,
-    pub request_id: &'a str,
+pub(crate) struct FirstMonthGrant<'a> {
+    pub(crate) order_id: &'a str,
+    pub(crate) anchor: &'a Anchor,
+    pub(crate) period: &'a Period,
+    pub(crate) monthly_credits: i64,
+    pub(crate) paid_at: i64,
+    pub(crate) request_id: &'a str,
 }
 
 #[derive(Deserialize)]
@@ -60,16 +48,16 @@ struct Grant<'a> {
 /// Append after marking the order PAID and inserting its service period, before committing the
 /// payment batch. The caller owns payment idempotency and concurrency guards for the whole batch.
 /// A paid future renewal is picked up by synchronization at its start time.
-pub fn prepare_paid_first_month(
+pub(crate) fn prepare_paid_first_month(
     db: &D1Database,
     scope: &CreditScope<'_>,
     payment: FirstMonthGrant<'_>,
-) -> Result<Vec<D1PreparedStatement>> {
+) -> ApiResult<Vec<D1PreparedStatement>> {
     if payment.period.starts_at > payment.paid_at {
         return Ok(Vec::new());
     }
     if payment.period.starts_at != payment.paid_at {
-        return Err(UNAVAILABLE);
+        return Err(ApiError::BILLING_UNAVAILABLE);
     }
     let expires_at = if payment.period.month_count == 1 {
         payment.period.ends_at
@@ -87,12 +75,12 @@ pub fn prepare_paid_first_month(
     grant.prepare(db, scope, payment.paid_at, payment.request_id)
 }
 
-pub async fn sync_credit_periods(
+pub(crate) async fn sync_credit_periods(
     db: &D1Database,
     scope: &CreditScope<'_>,
     now: i64,
     request_id: &str,
-) -> Result<()> {
+) -> ApiResult<()> {
     sync_until(db, scope, now, request_id, i64::MAX).await
 }
 
@@ -102,7 +90,7 @@ pub(super) async fn sync_until(
     now: i64,
     request_id: &str,
     deadline: i64,
-) -> Result<()> {
+) -> ApiResult<()> {
     // Apply hold deadlines that fell before the month ended before archiving its buckets.
     cleanup::release_due_holds(db, scope, now, request_id, deadline).await?;
     if storage::now() >= deadline {
@@ -114,8 +102,8 @@ pub(super) async fn sync_until(
     }
 
     let mut values = scope.values().to_vec();
-    values.push(number(now)?);
-    let paid: Vec<PaidPeriod> = bind(
+    values.push(integer(now)?);
+    let paid: Vec<PaidPeriod> = prepare(
         db,
         "SELECT p.order_id, p.month_offset, p.month_count, p.starts_at, p.ends_at,
                 s.anchor_at, s.billing_time_zone, o.monthly_credits,
@@ -132,9 +120,9 @@ pub(super) async fn sync_until(
     )?
     .all()
     .await
-    .map_err(|_| UNAVAILABLE)?
+    .map_err(|_| ApiError::BILLING_UNAVAILABLE)?
     .results()
-    .map_err(|_| UNAVAILABLE)?;
+    .map_err(|_| ApiError::BILLING_UNAVAILABLE)?;
     let mut archive_late_grants = false;
     for row in paid {
         let anchor = Anchor {
@@ -148,7 +136,10 @@ pub(super) async fn sync_until(
             if row.issued & (1 << index) != 0 {
                 continue;
             }
-            let offset = row.month_offset.checked_add(index).ok_or(UNAVAILABLE)?;
+            let offset = row
+                .month_offset
+                .checked_add(index)
+                .ok_or(ApiError::BILLING_UNAVAILABLE)?;
             let starts_at = if index == 0 {
                 row.starts_at
             } else {
@@ -181,8 +172,8 @@ pub(super) async fn sync_until(
     Ok(())
 }
 
-fn next_month(offset: u32) -> Result<u32> {
-    offset.checked_add(1).ok_or(UNAVAILABLE)
+fn next_month(offset: u32) -> ApiResult<u32> {
+    offset.checked_add(1).ok_or(ApiError::BILLING_UNAVAILABLE)
 }
 
 impl Grant<'_> {
@@ -192,7 +183,7 @@ impl Grant<'_> {
         scope: &CreditScope<'_>,
         now: i64,
         request_id: &str,
-    ) -> Result<Vec<D1PreparedStatement>> {
+    ) -> ApiResult<Vec<D1PreparedStatement>> {
         let id = new_id();
         let audit_id = new_id();
         let detail = json!({"orderId": self.order_id, "monthIndex": self.month_index, "amount": self.amount});
@@ -212,9 +203,9 @@ impl Grant<'_> {
         paid.extend([
             self.order_id.into(),
             self.month_index.into(),
-            number(self.starts_at)?,
-            number(self.expires_at)?,
-            number(self.amount)?,
+            integer(self.starts_at)?,
+            integer(self.expires_at)?,
+            integer(self.amount)?,
             self.order_id.into(),
             self.month_index.into(),
         ]);
@@ -225,12 +216,12 @@ impl Grant<'_> {
         ];
         row.extend(scope.values());
         row.extend([
-            number(self.starts_at)?,
-            number(self.expires_at)?,
-            number(self.amount)?,
-            number(self.amount)?,
-            number(now)?,
-            number(now)?,
+            integer(self.starts_at)?,
+            integer(self.expires_at)?,
+            integer(self.amount)?,
+            integer(self.amount)?,
+            integer(now)?,
+            integer(now)?,
         ]);
         let mut batch = vec![
             guard(db,
@@ -240,13 +231,13 @@ impl Grant<'_> {
                      AND p.starts_at<=? AND p.ends_at>=? AND o.monthly_credits=?)
                    AND NOT EXISTS (SELECT 1 FROM billing_credit_period WHERE order_id=? AND month_index=?)",
                   &paid)?,
-            bind(db,
+            prepare(db,
                  "INSERT INTO billing_credit_period
                   (id, order_id, month_index, product, owner_kind, owner_id, starts_at, expires_at,
                    status, granted, available, reserved, consumed, expired, granted_at, updated_at)
                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, 0, 0, 0, ?, ?)",
                  &row)?,
-            audit.prepare(db).map_err(|_| UNAVAILABLE)?,
+            audit.prepare(db)?,
             LedgerEntry {
                 id: &new_id(), period_id: &id, hold_id: None, kind: "GRANT",
                 delta: Delta { granted: self.amount, available: self.amount, ..Delta::default() },
@@ -254,7 +245,7 @@ impl Grant<'_> {
             }.prepare(db, &audit)?,
         ];
         if self.last {
-            batch.push(bind(
+            batch.push(prepare(
                 db,
                 "UPDATE billing_order_service_period SET credits_complete=1 WHERE order_id=?",
                 &[self.order_id.into()],
@@ -269,11 +260,11 @@ impl Grant<'_> {
         scope: &CreditScope<'_>,
         now: i64,
         request_id: &str,
-    ) -> Result<()> {
+    ) -> ApiResult<()> {
         match storage::commit(db, self.prepare(db, scope, now, request_id)?).await {
             Ok(_) => Ok(()),
             Err(CommitFailure::GuardRejected) => {
-                let completed = bind(
+                let completed = prepare(
                     db,
                     "SELECT 1 AS ok FROM billing_order_service_period p
                      JOIN billing_order o ON o.id=p.order_id
@@ -284,14 +275,14 @@ impl Grant<'_> {
                 )?
                 .first::<i32>(Some("ok"))
                 .await
-                .map_err(|_| UNAVAILABLE)?;
+                .map_err(|_| ApiError::BILLING_UNAVAILABLE)?;
                 if completed == Some(1) {
                     Ok(())
                 } else {
                     Err(ApiError::VERSION_CONFLICT)
                 }
             }
-            Err(error) => Err(commit_failure(error)),
+            Err(error) => Err(error.into_api_error()),
         }
     }
 }
@@ -300,21 +291,21 @@ pub(super) async fn period_at(
     db: &D1Database,
     scope: &CreditScope<'_>,
     at: i64,
-) -> Result<Option<CreditPeriod>> {
+) -> ApiResult<Option<CreditPeriod>> {
     read_period(db, scope, at)?
         .first(None)
         .await
-        .map_err(|_| UNAVAILABLE)
+        .map_err(|_| ApiError::BILLING_UNAVAILABLE)
 }
 
 pub(super) fn read_period(
     db: &D1Database,
     scope: &CreditScope<'_>,
     at: i64,
-) -> Result<D1PreparedStatement> {
+) -> ApiResult<D1PreparedStatement> {
     let mut values = scope.values().to_vec();
-    values.extend([number(at)?, number(at)?]);
-    bind(db, include_str!("sql/period_at.sql"), &values)
+    values.extend([integer(at)?, integer(at)?]);
+    prepare(db, include_str!("sql/period_at.sql"), &values)
 }
 
 async fn archive_due(
@@ -323,15 +314,15 @@ async fn archive_due(
     now: i64,
     request_id: &str,
     deadline: i64,
-) -> Result<()> {
+) -> ApiResult<()> {
     let mut values = scope.values().to_vec();
-    values.push(number(now)?);
-    let rows: Vec<CreditPeriod> = bind(db, include_str!("sql/archive_due.sql"), &values)?
+    values.push(integer(now)?);
+    let rows: Vec<CreditPeriod> = prepare(db, include_str!("sql/archive_due.sql"), &values)?
         .all()
         .await
-        .map_err(|_| UNAVAILABLE)?
+        .map_err(|_| ApiError::BILLING_UNAVAILABLE)?
         .results()
-        .map_err(|_| UNAVAILABLE)?;
+        .map_err(|_| ApiError::BILLING_UNAVAILABLE)?;
     for mut row in rows {
         for attempt in 0..4 {
             if storage::now() >= deadline {
@@ -342,7 +333,7 @@ async fn archive_due(
                 Ok(_) => break,
                 Err(CommitFailure::GuardRejected) => {
                     cleanup::release_due_holds(db, scope, now, request_id, deadline).await?;
-                    let updated: Option<CreditPeriod> = bind(
+                    let updated: Option<CreditPeriod> = prepare(
                         db,
                         "SELECT id, starts_at, expires_at, granted, available, reserved, consumed, version, status
                          FROM billing_credit_period WHERE id=? AND status='ACTIVE'",
@@ -350,14 +341,14 @@ async fn archive_due(
                     )?
                     .first(None)
                     .await
-                    .map_err(|_| UNAVAILABLE)?;
+                    .map_err(|_| ApiError::BILLING_UNAVAILABLE)?;
                     let Some(updated) = updated else { break };
                     if attempt == 3 {
                         return Err(ApiError::VERSION_CONFLICT);
                     }
                     row = updated;
                 }
-                Err(error) => return Err(commit_failure(error)),
+                Err(error) => return Err(error.into_api_error()),
             }
         }
     }
@@ -370,7 +361,7 @@ fn archive_batch(
     row: &CreditPeriod,
     now: i64,
     request_id: &str,
-) -> Result<Vec<D1PreparedStatement>> {
+) -> ApiResult<Vec<D1PreparedStatement>> {
     let audit_id = new_id();
     let expired = row.available + row.reserved;
     let detail = json!({"amount": expired});
@@ -387,7 +378,7 @@ fn archive_batch(
         created_at: now,
     };
     let condition = "id=? AND version=? AND status='ACTIVE' AND expires_at<=?";
-    let version = [row.id.as_str().into(), number(row.version)?, number(now)?];
+    let version = [row.id.as_str().into(), integer(row.version)?, integer(now)?];
     Ok(vec![
         guard(
             db,
@@ -401,12 +392,12 @@ fn archive_batch(
             ),
             &version,
         )?,
-        bind(
+        prepare(
             db,
             include_str!("sql/archive_holds.sql"),
-            &[number(now)?, row.id.as_str().into()],
+            &[integer(now)?, row.id.as_str().into()],
         )?,
-        bind(
+        prepare(
             db,
             &format!(
                 "UPDATE billing_credit_period
@@ -414,13 +405,13 @@ fn archive_batch(
                   status='EXPIRED', updated_at=?, version=version+1 WHERE {condition}"
             ),
             &[
-                number(now)?,
+                integer(now)?,
                 version[0].clone(),
                 version[1].clone(),
                 version[2].clone(),
             ],
         )?,
-        audit.prepare(db).map_err(|_| UNAVAILABLE)?,
+        audit.prepare(db)?,
         LedgerEntry {
             id: &new_id(),
             period_id: &row.id,
