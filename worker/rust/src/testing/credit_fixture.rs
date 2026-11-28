@@ -1,7 +1,18 @@
-use super::*;
-use crate::core::calendar::{Interval, purchase_period};
-use crate::core::storage;
 use serde::Deserialize;
+use serde_json::json;
+use worker::Request;
+
+use crate::{
+    app::RequestContext,
+    core::{
+        calendar::{Interval, purchase_period},
+        http::{ApiError, ApiReply, ApiResult},
+        identity::{Owner, require_internal_channel},
+        storage::{self, integer, prepare},
+    },
+    credit::{CreditScope, FirstMonthGrant, prepare_paid_first_month},
+};
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Payment {
@@ -13,7 +24,7 @@ struct Payment {
     reject_after_grant: bool,
 }
 
-pub(crate) async fn pay(mut request: Request, ctx: &RequestContext<'_>) -> Result<ApiReply> {
+pub(crate) async fn pay(mut request: Request, ctx: &RequestContext<'_>) -> ApiResult<ApiReply> {
     require_internal_channel(&request, ctx.env)?;
     let now = ctx.now;
     let request_id = ctx.request_id;
@@ -31,18 +42,18 @@ pub(crate) async fn pay(mut request: Request, ctx: &RequestContext<'_>) -> Resul
     let subscription_id = format!("subscription-{id}");
     let mut batch = vec![
         storage::guard(&db, "EXISTS(SELECT 1 FROM billing_order WHERE id=? AND status='PENDING_PAYMENT' AND payment_expires_at>?)",
-            &[id.as_str().into(), number(now)?]).map_err(|_| UNAVAILABLE)?,
-        bind(&db, "UPDATE billing_order SET status='PAID', paid_at=?, payment_provider='fixture', provider_payment_id=? WHERE id=?",
-            &[number(now)?, id.as_str().into(), id.as_str().into()])?,
-        bind(&db, "INSERT INTO billing_subscription (id,product,owner_kind,owner_id,plan_id,billing_time_zone,anchor_at)
+            &[id.as_str().into(), integer(now)?])?,
+        prepare(&db, "UPDATE billing_order SET status='PAID', paid_at=?, payment_provider='fixture', provider_payment_id=? WHERE id=?",
+            &[integer(now)?, id.as_str().into(), id.as_str().into()])?,
+        prepare(&db, "INSERT INTO billing_subscription (id,product,owner_kind,owner_id,plan_id,billing_time_zone,anchor_at)
                    VALUES (?,'WORK',?,?,?,?,?)",
             &[subscription_id.as_str().into(), payment.owner.kind.as_str().into(), payment.owner.id.as_str().into(),
-                payment.plan_id.as_str().into(), anchor.time_zone.as_str().into(), number(anchor.at)?])?,
-        bind(&db, "INSERT INTO billing_order_service_period
+                payment.plan_id.as_str().into(), anchor.time_zone.as_str().into(), integer(anchor.at)?])?,
+        prepare(&db, "INSERT INTO billing_order_service_period
                    (order_id,subscription_id,product,owner_kind,owner_id,plan_id,month_offset,month_count,starts_at,ends_at)
                    VALUES (?,?,'WORK',?,?,?,0,?,?,?)",
             &[id.as_str().into(), subscription_id.as_str().into(), payment.owner.kind.as_str().into(), payment.owner.id.as_str().into(),
-                payment.plan_id.as_str().into(), payment.interval.months().into(), number(period.starts_at)?, number(period.ends_at)?])?,
+                payment.plan_id.as_str().into(), payment.interval.months().into(), integer(period.starts_at)?, integer(period.ends_at)?])?,
     ];
     batch.extend(prepare_paid_first_month(
         &db,
@@ -57,19 +68,19 @@ pub(crate) async fn pay(mut request: Request, ctx: &RequestContext<'_>) -> Resul
         },
     )?);
     if payment.reject_after_grant {
-        batch.push(storage::guard(&db, "0", &[]).map_err(|_| UNAVAILABLE)?);
+        batch.push(storage::guard(&db, "0", &[])?);
     }
     let result = storage::commit(&db, batch).await;
     if let Err(error) = result {
         let paid = db
             .prepare("SELECT status FROM billing_order WHERE id=?")
             .bind(&[id.as_str().into()])
-            .map_err(|_| UNAVAILABLE)?
+            .map_err(|_| ApiError::BILLING_UNAVAILABLE)?
             .first::<String>(Some("status"))
             .await
-            .map_err(|_| UNAVAILABLE)?;
+            .map_err(|_| ApiError::BILLING_UNAVAILABLE)?;
         if paid.as_deref() != Some("PAID") {
-            return Err(super::commit_failure(error));
+            return Err(error.into_api_error());
         }
     }
     Ok(ApiReply::ok(

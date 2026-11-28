@@ -1,5 +1,148 @@
-use super::super::snapshot;
-use super::*;
+use serde::Deserialize;
+use serde_json::{Value, json};
+use worker::{D1Database, Request};
+
+use crate::{
+    app::Route,
+    core::{
+        http::{ApiError, ApiReply, ApiResult, generated_id as new_id, read_json},
+        idempotency::{self, Audit, RECEIPT_TTL_MS, ReceiptKey, Success},
+        storage::{self, CommitFailure, MAX_INTEGER, prepare},
+    },
+};
+
+use super::super::{
+    model::{CreditPeriod, LedgerEntry, optional},
+    periods::{self, sync_credit_periods},
+    snapshot,
+};
+use super::{
+    holds::{HoldRow, find_hold, read_hold},
+    types::{
+        ConsumeRequest, HoldRequest, INSUFFICIENT, INVALID, Operation, Segment, SettleRequest,
+        Usage,
+    },
+};
+
+#[derive(Deserialize)]
+struct AuditDetails {
+    details_json: String,
+}
+
+pub(super) struct Write<'a> {
+    pub(super) db: &'a D1Database,
+    pub(super) usage: &'a Usage,
+    pub(super) request_id: &'a str,
+    pub(super) idempotency_key: &'a str,
+    pub(super) now: i64,
+}
+
+pub(in crate::credit) async fn handle(
+    route: &Route<'_>,
+    mut request: Request,
+    db: &D1Database,
+    now: i64,
+    request_id: &str,
+) -> ApiResult<ApiReply> {
+    let idempotency_key = idempotency::header(&request)?;
+
+    let body: Value = read_json(&mut request).await?.ok_or(INVALID)?;
+    let make = |usage| Write {
+        db,
+        usage,
+        idempotency_key: &idempotency_key,
+        request_id,
+        now,
+    };
+    match route {
+        Route::CreateHold => {
+            let input: HoldRequest = parse(&body)?;
+            input.usage.validate(now)?;
+            check_amount(input.amount)?;
+            if !(input.usage.occurred_at + 1..=MAX_INTEGER).contains(&input.expires_at) {
+                return Err(INVALID);
+            }
+            make(&input.usage)
+                .run(Operation::Hold(&input), &body, None)
+                .await
+        }
+        Route::Consume => {
+            let input: ConsumeRequest = parse(&body)?;
+            input.usage.validate(now)?;
+            check_amount(input.amount)?;
+            make(&input.usage)
+                .run(Operation::Consume(&input), &body, None)
+                .await
+        }
+        Route::SettleHold(id) => {
+            let input: SettleRequest = parse(&body)?;
+            input.usage.validate(now)?;
+            make(&input.usage).settle(id, &input.segments, &body).await
+        }
+        Route::ReleaseHold(id) => {
+            let usage: Usage = parse(&body)?;
+            usage.validate(now)?;
+            make(&usage).run(Operation::Release(id), &body, None).await
+        }
+        _ => Err(ApiError::NOT_FOUND),
+    }
+}
+
+fn parse<T: serde::de::DeserializeOwned>(body: &Value) -> ApiResult<T> {
+    serde_json::from_value(body.clone()).map_err(|_| INVALID)
+}
+
+fn check_amount(amount: i64) -> ApiResult<()> {
+    if (1..=MAX_INTEGER).contains(&amount) {
+        Ok(())
+    } else {
+        Err(INVALID)
+    }
+}
+
+impl Write<'_> {
+    async fn settle(&self, id: &str, segments: &[Segment], body: &Value) -> ApiResult<ApiReply> {
+        if segments.len() > 16
+            || segments.is_empty()
+            || segments
+                .windows(2)
+                .any(|rows| rows[0].occurred_at > rows[1].occurred_at)
+        {
+            return Err(INVALID);
+        }
+        for segment in segments {
+            check_amount(segment.amount)?;
+            if !(0..=self.now).contains(&segment.occurred_at) {
+                return Err(INVALID);
+            }
+        }
+        let mut settled = Vec::with_capacity(segments.len());
+        let mut hold = Value::Null;
+        for (index, segment) in segments.iter().enumerate() {
+            match self
+                .run(
+                    Operation::Settle(id, *segment),
+                    body,
+                    Some((index, index + 1 == segments.len())),
+                )
+                .await
+            {
+                Ok(reply) => {
+                    settled.push(reply.body["data"]["settledSegments"][0].clone());
+                    hold = reply.body["data"]["hold"].clone();
+                }
+                Err(error) if error == INSUFFICIENT => {
+                    return Err(error
+                        .with_data(json!({"settledSegments": settled, "failedSegment": segment})));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(ApiReply::ok(
+            json!({ "hold": hold, "settledSegments": settled }),
+        ))
+    }
+}
 
 impl Write<'_> {
     pub(super) async fn run(
@@ -7,7 +150,7 @@ impl Write<'_> {
         operation: Operation<'_>,
         body: &Value,
         segment: Option<(usize, bool)>,
-    ) -> Result<(u16, Value)> {
+    ) -> ApiResult<ApiReply> {
         let target = match operation {
             Operation::Settle(id, _) | Operation::Release(id) => id,
             _ => &self.usage.reference_id,
@@ -51,12 +194,12 @@ impl Write<'_> {
             };
             let [timeout, archive, grant] = snapshot::probes(self.db, &scope, self.now)?;
             let lookup_id = hold_id.unwrap_or("");
-            let audit_read = bind(
+            let audit_read = prepare(
                 self.db,
                 "SELECT details_json FROM billing_audit WHERE id=?",
-                &[super::super::optional(durable_audit.as_deref())],
+                &[optional(durable_audit.as_deref())],
             )?;
-            let held_period_read = bind(
+            let held_period_read = prepare(
                 self.db, "SELECT p.* FROM billing_credit_period p JOIN billing_credit_hold h
                       ON h.credit_period_id=p.id WHERE h.id=? AND h.product=? AND h.owner_kind=? AND h.owner_id=?",
                 &[lookup_id.into(),scope.product.into(),scope.owner.kind.as_str().into(),scope.owner.id.as_str().into()],
@@ -94,17 +237,20 @@ impl Write<'_> {
             }
             let receipt = idempotency::Receipt::verify(storage::first_row(&receipt)?, &hash)?;
             let replay = if let Some(receipt) = receipt {
-                Some((
+                Some(ApiReply::stored(
                     receipt.response_status,
-                    serde_json::from_str(&receipt.response_json).map_err(|_| UNAVAILABLE)?,
-                ))
+                    &receipt.response_json,
+                )?)
             } else if let Some(audit) = storage::first_row::<AuditDetails>(&audit)? {
-                let details: Value =
-                    serde_json::from_str(&audit.details_json).map_err(|_| UNAVAILABLE)?;
+                let details: Value = serde_json::from_str(&audit.details_json)
+                    .map_err(|_| ApiError::BILLING_UNAVAILABLE)?;
                 if details["requestHash"] != hash {
                     return Err(ApiError::IDEMPOTENCY_CONFLICT);
                 }
-                Some((200, details["result"].clone()))
+                Some(ApiReply {
+                    status: 200,
+                    body: details["result"].clone(),
+                })
             } else {
                 None
             };
@@ -120,11 +266,11 @@ impl Write<'_> {
                 sync_credit_periods(self.db, &scope, self.now, self.request_id).await?;
                 continue;
             }
-            if let Some((status, mut body)) = replay {
+            if let Some(mut reply) = replay {
                 if let Some(row) = row {
-                    body["data"]["hold"] = json!(row.snapshot());
+                    reply.body["data"]["hold"] = json!(row.snapshot());
                 }
-                return Ok((status, body));
+                return Ok(reply);
             }
             let period = storage::first_row(&period)?;
 
@@ -189,7 +335,7 @@ impl Write<'_> {
                 created_at: self.now,
             };
             let mut batch = mutation.statements;
-            batch.push(audit.prepare(self.db).map_err(|_| UNAVAILABLE)?);
+            batch.push(audit.prepare(self.db)?);
             if let Some(period_id) = &mutation.period_id {
                 batch.push(
                     LedgerEntry {
@@ -233,7 +379,10 @@ impl Write<'_> {
                         response["data"]["hold"] =
                             json!(find_hold(self.db, &scope, id).await?.snapshot());
                     }
-                    return Ok((status, response));
+                    return Ok(ApiReply {
+                        status,
+                        body: response,
+                    });
                 }
                 Err(error) => {
                     if let Some(response) =
@@ -242,7 +391,7 @@ impl Write<'_> {
                         return Ok(response);
                     }
                     if error != CommitFailure::GuardRejected {
-                        return Err(commit_failure(error));
+                        return Err(error.into_api_error());
                     }
                 }
             }
@@ -255,26 +404,29 @@ impl Write<'_> {
         key: &ReceiptKey<'_>,
         hash: &str,
         audit_id: Option<&str>,
-    ) -> Result<Option<(u16, Value)>> {
+    ) -> ApiResult<Option<ApiReply>> {
         if let Some(receipt) = key.lookup(self.db, self.now, hash).await? {
-            let body = serde_json::from_str(&receipt.response_json).map_err(|_| UNAVAILABLE)?;
-            return Ok(Some((receipt.response_status, body)));
+            return ApiReply::stored(receipt.response_status, &receipt.response_json).map(Some);
         }
         if let Some(audit_id) = audit_id {
-            let details = bind(
+            let details = prepare(
                 self.db,
                 "SELECT details_json FROM billing_audit WHERE id=?",
                 &[audit_id.into()],
             )?
             .first::<String>(Some("details_json"))
             .await
-            .map_err(|_| UNAVAILABLE)?;
+            .map_err(|_| ApiError::BILLING_UNAVAILABLE)?;
             if let Some(details) = details {
-                let details: Value = serde_json::from_str(&details).map_err(|_| UNAVAILABLE)?;
+                let details: Value =
+                    serde_json::from_str(&details).map_err(|_| ApiError::BILLING_UNAVAILABLE)?;
                 if details["requestHash"].as_str() != Some(hash) {
                     return Err(ApiError::IDEMPOTENCY_CONFLICT);
                 }
-                return Ok(Some((200, details["result"].clone())));
+                return Ok(Some(ApiReply {
+                    status: 200,
+                    body: details["result"].clone(),
+                }));
             }
         }
         Ok(None)

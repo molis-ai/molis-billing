@@ -1,20 +1,23 @@
 use worker::Request;
 
-use crate::core::http::{ApiError, valid_id};
+use crate::core::{
+    http::{ApiError, ApiResult, valid_id},
+    storage::MAX_INTEGER,
+};
 
-pub struct Page {
-    pub limit: u32,
-    pub cursor: Option<Cursor>,
+pub(crate) struct Page {
+    pub(crate) limit: u32,
+    pub(crate) cursor: Option<Cursor>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct Cursor {
-    pub created_at: i64,
-    pub id: String,
+pub(crate) struct Cursor {
+    pub(crate) created_at: i64,
+    pub(crate) id: String,
 }
 
 impl Page {
-    pub fn paginate_rows<T>(
+    pub(crate) fn paginate_rows<T>(
         &self,
         rows: &mut Vec<T>,
         cursor: impl FnOnce(&T) -> (i64, &str),
@@ -33,7 +36,7 @@ impl Page {
         })
     }
 
-    pub fn from_request(request: &Request) -> Result<Self, ApiError> {
+    pub(crate) fn from_request(request: &Request) -> ApiResult<Self> {
         let url = request.url().map_err(|_| ApiError::INVALID_REQUEST)?;
         let mut limit = None;
         let mut cursor = None;
@@ -61,16 +64,16 @@ impl Page {
 }
 
 impl Cursor {
-    pub fn encode(&self) -> String {
+    pub(crate) fn encode(&self) -> String {
         format!("{}:{}", self.created_at, self.id)
     }
 
-    pub fn decode(value: &str) -> Result<Self, ApiError> {
+    pub(crate) fn decode(value: &str) -> ApiResult<Self> {
         let (timestamp, id) = value.split_once(':').ok_or(ApiError::INVALID_REQUEST)?;
         let created_at = timestamp
             .parse::<i64>()
             .ok()
-            .filter(|at| (0..=9_007_199_254_740_991).contains(at))
+            .filter(|at| (0..=MAX_INTEGER).contains(at))
             .ok_or(ApiError::INVALID_REQUEST)?;
         if !valid_id(id) {
             return Err(ApiError::INVALID_REQUEST);

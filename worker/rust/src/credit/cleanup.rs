@@ -2,21 +2,21 @@ use serde::Deserialize;
 use serde_json::json;
 use worker::D1Database;
 
-use super::{
-    CreditScope, Delta, LedgerEntry, Result, SYSTEM, UNAVAILABLE, bind, commit_failure,
-    mutations::{find_hold, update_period},
-    new_id, number,
-    periods::period_at,
-    periods::sync_until,
-};
 use crate::{
-    core::http::ApiError,
-    core::idempotency::Audit,
-    core::identity::{Owner, OwnerKind},
-    core::storage::{self, CommitFailure},
+    core::{
+        http::{ApiError, ApiResult, generated_id as new_id},
+        idempotency::Audit,
+        identity::{Owner, OwnerKind},
+        storage::{self, CommitFailure, integer, prepare},
+    },
+    maintenance::{CLEANUP_BATCH, log_failure},
 };
 
-const CLEANUP_BATCH: u32 = 32;
+use super::{
+    model::{CreditScope, Delta, LedgerEntry, SYSTEM},
+    mutations::{find_hold, update_period},
+    periods::{period_at, sync_until},
+};
 
 #[derive(Deserialize)]
 struct SubjectRow {
@@ -25,17 +25,22 @@ struct SubjectRow {
     owner_id: String,
 }
 
-pub async fn sync_due(db: &D1Database, now: i64, request_id: &str, deadline: i64) -> Result<()> {
-    let subjects: Vec<SubjectRow> = bind(
+pub(crate) async fn sync_due(
+    db: &D1Database,
+    now: i64,
+    request_id: &str,
+    deadline: i64,
+) -> ApiResult<()> {
+    let subjects: Vec<SubjectRow> = prepare(
         db,
         include_str!("sql/cleanup_due.sql"),
-        &[number(now)?, CLEANUP_BATCH.into()],
+        &[integer(now)?, CLEANUP_BATCH.into()],
     )?
     .all()
     .await
-    .map_err(|_| UNAVAILABLE)?
+    .map_err(|_| ApiError::BILLING_UNAVAILABLE)?
     .results()
-    .map_err(|_| UNAVAILABLE)?;
+    .map_err(|_| ApiError::BILLING_UNAVAILABLE)?;
     for row in subjects {
         let owner = Owner {
             kind: row.owner_kind,
@@ -49,7 +54,7 @@ pub async fn sync_due(db: &D1Database, now: i64, request_id: &str, deadline: i64
             break;
         }
         if let Err(error) = sync_until(db, &scope, now, request_id, deadline).await {
-            crate::maintenance::log_failure("credits.sync", &owner.id, &error);
+            log_failure("credits.sync", &owner.id, &error);
         }
     }
     Ok(())
@@ -67,15 +72,15 @@ pub(super) async fn release_due_holds(
     now: i64,
     request_id: &str,
     deadline: i64,
-) -> Result<()> {
+) -> ApiResult<()> {
     let mut values = scope.values().to_vec();
-    values.push(number(now)?);
-    let due: Vec<DueHold> = bind(db, include_str!("sql/release_due_holds.sql"), &values)?
+    values.push(integer(now)?);
+    let due: Vec<DueHold> = prepare(db, include_str!("sql/release_due_holds.sql"), &values)?
         .all()
         .await
-        .map_err(|_| UNAVAILABLE)?
+        .map_err(|_| ApiError::BILLING_UNAVAILABLE)?
         .results()
-        .map_err(|_| UNAVAILABLE)?;
+        .map_err(|_| ApiError::BILLING_UNAVAILABLE)?;
     for row in due {
         for attempt in 0..4 {
             if storage::now() >= deadline {
@@ -88,9 +93,9 @@ pub(super) async fn release_due_holds(
             }
             let period = period_at(db, scope, row.occurred_at)
                 .await?
-                .ok_or(UNAVAILABLE)?;
+                .ok_or(ApiError::BILLING_UNAVAILABLE)?;
             if period.id != updated.credit_period_id {
-                return Err(UNAVAILABLE);
+                return Err(ApiError::BILLING_UNAVAILABLE);
             }
             if period.status == "EXPIRED" {
                 // The month closed after the hold read.
@@ -123,7 +128,7 @@ pub(super) async fn release_due_holds(
             };
             let mut batch = hold.update(db, &updated, now)?.to_vec();
             batch.extend(update_period(db, &period, &delta, now)?);
-            batch.push(audit.prepare(db).map_err(|_| UNAVAILABLE)?);
+            batch.push(audit.prepare(db)?);
             batch.push(
                 LedgerEntry {
                     id: &new_id(),
@@ -140,7 +145,7 @@ pub(super) async fn release_due_holds(
             match storage::commit(db, batch).await {
                 Ok(_) => break,
                 Err(CommitFailure::GuardRejected) if attempt < 3 => {}
-                Err(error) => return Err(commit_failure(error)),
+                Err(error) => return Err(error.into_api_error()),
             }
         }
     }

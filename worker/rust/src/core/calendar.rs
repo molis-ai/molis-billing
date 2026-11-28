@@ -1,11 +1,11 @@
 //! All billing boundaries use UTC milliseconds and the original local calendar anchor.
 use serde::{Deserialize, Serialize};
-use wasm_bindgen::prelude::*;
+use wasm_bindgen::{JsValue, prelude::wasm_bindgen};
 
-use crate::core::http::ApiError;
+use crate::core::http::{ApiError, ApiResult};
 
 const DEFAULT_ZONE: &str = "Asia/Shanghai";
-const DATE_MAX: i64 = 8_640_000_000_000_000;
+pub(crate) const DATE_MAX: i64 = 8_640_000_000_000_000;
 
 #[wasm_bindgen(module = "/src/runtime/foundation.js")]
 extern "C" {
@@ -17,20 +17,20 @@ extern "C" {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
-pub enum Interval {
+pub(crate) enum Interval {
     Month,
     Year,
 }
 
 impl Interval {
-    pub const fn months(self) -> u32 {
+    pub(crate) const fn months(self) -> u32 {
         match self {
             Self::Month => 1,
             Self::Year => 12,
         }
     }
 
-    pub const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Month => "MONTH",
             Self::Year => "YEAR",
@@ -39,30 +39,30 @@ impl Interval {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Anchor {
-    pub at: i64,
-    pub time_zone: String,
+pub(crate) struct Anchor {
+    pub(crate) at: i64,
+    pub(crate) time_zone: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Period {
-    pub month_offset: u32,
-    pub month_count: u32,
-    pub starts_at: i64,
-    pub ends_at: i64,
+pub(crate) struct Period {
+    pub(crate) month_offset: u32,
+    pub(crate) month_count: u32,
+    pub(crate) starts_at: i64,
+    pub(crate) ends_at: i64,
 }
 
 /// Only pass a current, non-revoked, same-plan period from the authenticated subject.
-pub struct Renewal<'a> {
-    pub anchor: &'a Anchor,
-    pub current: Period,
+pub(crate) struct Renewal<'a> {
+    pub(crate) anchor: &'a Anchor,
+    pub(crate) current: Period,
 }
 
-pub fn validate_time_zone(raw: Option<&str>) -> Result<String, ApiError> {
+pub(crate) fn validate_time_zone(raw: Option<&str>) -> ApiResult<String> {
     normalize_zone(raw.unwrap_or(DEFAULT_ZONE)).map_err(|_| ApiError::INVALID_TIMEZONE)
 }
 
-pub fn boundary_at(anchor: &Anchor, month_offset: u32) -> Result<i64, ApiError> {
+pub(crate) fn boundary_at(anchor: &Anchor, month_offset: u32) -> ApiResult<i64> {
     if !(0..=DATE_MAX).contains(&anchor.at) {
         return Err(ApiError::BILLING_UNAVAILABLE);
     }
@@ -74,21 +74,21 @@ pub fn boundary_at(anchor: &Anchor, month_offset: u32) -> Result<i64, ApiError> 
     Ok(value as i64)
 }
 
-pub const fn covers(starts_at: i64, ends_at: i64, now: i64) -> bool {
+pub(crate) const fn covers(starts_at: i64, ends_at: i64, now: i64) -> bool {
     starts_at <= now && now < ends_at
 }
 
-pub const fn refund_allowed(starts_at: i64, now: i64) -> bool {
+pub(crate) const fn refund_allowed(starts_at: i64, now: i64) -> bool {
     now < starts_at
 }
 
 /// The commit guard must independently verify the selected current period and future-slot availability.
-pub fn purchase_period(
+pub(crate) fn purchase_period(
     paid_at: i64,
     order_time_zone: &str,
     interval: Interval,
     renewal: Option<Renewal<'_>>,
-) -> Result<(Anchor, Period), ApiError> {
+) -> ApiResult<(Anchor, Period)> {
     purchase_period_with(
         paid_at,
         order_time_zone,
@@ -104,9 +104,9 @@ fn purchase_period_with(
     order_time_zone: &str,
     interval: Interval,
     renewal: Option<Renewal<'_>>,
-    validate_zone: impl FnOnce(Option<&str>) -> Result<String, ApiError>,
-    boundary: impl FnOnce(&Anchor, u32) -> Result<i64, ApiError>,
-) -> Result<(Anchor, Period), ApiError> {
+    validate_zone: impl FnOnce(Option<&str>) -> ApiResult<String>,
+    boundary: impl FnOnce(&Anchor, u32) -> ApiResult<i64>,
+) -> ApiResult<(Anchor, Period)> {
     let (anchor, month_offset, starts_at) = match renewal {
         Some(renewal) if covers(renewal.current.starts_at, renewal.current.ends_at, paid_at) => {
             let offset = renewal

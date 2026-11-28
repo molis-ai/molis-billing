@@ -1,4 +1,17 @@
-use super::*;
+use wasm_bindgen::JsValue;
+use worker::D1PreparedStatement;
+
+use crate::core::{
+    calendar::{self, Anchor, Period},
+    http::{ApiError, ApiResult, generated_id as new_id},
+    storage::{integer, prepare},
+};
+
+use super::super::{
+    model::{Order, ServicePeriod, Status, Subject},
+    service::Orders,
+};
+use super::records::PaymentEvent;
 
 impl Orders<'_> {
     pub(super) fn stage_payment(
@@ -27,9 +40,9 @@ impl Orders<'_> {
             owner: &owner,
         };
         let mut values = vec![
-            number(now)?,
+            integer(now)?,
             order.id.as_str().into(),
-            number(order.version)?,
+            integer(order.version)?,
         ];
         values.extend(subject.bind());
         values.push(current.map_or(JsValue::NULL, |p| p.order_id.as_str().into()));
@@ -49,7 +62,7 @@ impl Orders<'_> {
             "UPDATE billing_order SET status='PAID', paid_at=?, payment_provider=?,
                  provider_payment_id=?, version=version+1 WHERE id=?",
             &[
-                number(now)?,
+                integer(now)?,
                 record.provider.into(),
                 record.event.payment_id.as_str().into(),
                 order.id.as_str().into(),
@@ -71,7 +84,7 @@ impl Orders<'_> {
                     owner.id.as_str().into(),
                     order.plan_id.as_str().into(),
                     anchor.time_zone.as_str().into(),
-                    number(anchor.at)?,
+                    integer(anchor.at)?,
                 ],
             )?);
             id
@@ -90,8 +103,8 @@ impl Orders<'_> {
                 order.plan_id.as_str().into(),
                 period.month_offset.into(),
                 period.month_count.into(),
-                number(period.starts_at)?,
-                number(period.ends_at)?,
+                integer(period.starts_at)?,
+                integer(period.ends_at)?,
             ],
         )?);
         order.status = Status::Paid;
@@ -114,19 +127,19 @@ impl Orders<'_> {
             "EXISTS (SELECT 1 FROM billing_order o JOIN billing_order_service_period p ON p.order_id=o.id
                WHERE o.id=?2 AND o.version=?3 AND o.status='PAID' AND p.revoked_at IS NULL
                  AND p.starts_at>now AND o.paid_at<=?1)",
-            &[number(now)?, order.id.as_str().into(), number(order.version)?],
+            &[integer(now)?, order.id.as_str().into(), integer(order.version)?],
         )?);
         batch.push(prepare(
             self.db,
             "UPDATE billing_order
             SET status='REFUNDED', refunded_at=?, version=version+1 WHERE id=?",
-            &[number(now)?, order.id.as_str().into()],
+            &[integer(now)?, order.id.as_str().into()],
         )?);
         batch.push(prepare(
             self.db,
             "UPDATE billing_order_service_period
             SET revoked_at=?, version=version+1 WHERE order_id=?",
-            &[number(now)?, order.id.as_str().into()],
+            &[integer(now)?, order.id.as_str().into()],
         )?);
         order.status = Status::Refunded;
         order.refunded_at = Some(now);

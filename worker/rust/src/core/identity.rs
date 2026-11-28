@@ -2,10 +2,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use subtle::ConstantTimeEq;
-use wasm_bindgen::prelude::*;
+use wasm_bindgen::{JsValue, prelude::wasm_bindgen};
 use worker::{Env, Request};
 
-use crate::core::http::{ApiError, valid_id};
+use crate::core::http::{ApiError, ApiResult, valid_id};
 
 const INTERNAL_HEADER: &str = "X-Molis-Internal-Secret";
 
@@ -23,13 +23,13 @@ extern "C" {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "UPPERCASE")]
-pub enum OwnerKind {
+pub(crate) enum OwnerKind {
     User,
     Tenant,
 }
 
 impl OwnerKind {
-    pub const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::User => "USER",
             Self::Tenant => "TENANT",
@@ -38,14 +38,14 @@ impl OwnerKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-pub struct Owner {
-    pub kind: OwnerKind,
-    pub id: String,
+pub(crate) struct Owner {
+    pub(crate) kind: OwnerKind,
+    pub(crate) id: String,
 }
 
 #[derive(Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
-pub enum Role {
+pub(crate) enum Role {
     #[serde(rename = "SELF")]
     Personal,
     Owner,
@@ -55,34 +55,34 @@ pub enum Role {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct VerifiedUser {
-    pub user_id: String,
-    pub product: String,
-    pub owner: Owner,
-    pub role: Role,
+pub(crate) struct VerifiedUser {
+    pub(crate) user_id: String,
+    pub(crate) product: String,
+    pub(crate) owner: Owner,
+    pub(crate) role: Role,
 }
 
 impl VerifiedUser {
-    pub fn ledger_actor_filter(&self) -> Option<&str> {
+    pub(crate) fn ledger_actor_filter(&self) -> Option<&str> {
         (self.role == Role::Member).then_some(&self.user_id)
     }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum UserAccess {
+pub(crate) enum UserAccess {
     Read,
     Manage,
 }
 
 #[derive(Debug)]
-pub struct UserContext {
-    pub product: String,
-    pub owner_kind: OwnerKind,
-    pub owner_id: Option<String>,
+pub(crate) struct UserContext {
+    pub(crate) product: String,
+    pub(crate) owner_kind: OwnerKind,
+    pub(crate) owner_id: Option<String>,
 }
 
 impl UserContext {
-    pub fn from_request(request: &Request, paginated: bool) -> Result<Self, ApiError> {
+    pub(crate) fn from_request(request: &Request, paginated: bool) -> ApiResult<Self> {
         let url = request.url().map_err(|_| ApiError::INVALID_REQUEST)?;
         let mut product = None;
         let mut kind = None;
@@ -118,7 +118,7 @@ impl UserContext {
     }
 }
 
-pub fn require_internal_channel(request: &Request, env: &Env) -> Result<(), ApiError> {
+pub(crate) fn require_internal_channel(request: &Request, env: &Env) -> ApiResult<()> {
     let secret = env
         .secret("MOLIS_INTERNAL_SECRET")
         .ok()
@@ -145,13 +145,13 @@ fn valid_secret(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
-pub async fn authorize_user(
+pub(crate) async fn authorize_user(
     request: &Request,
     env: &Env,
     subject: UserContext,
     access: UserAccess,
     request_id: &str,
-) -> Result<VerifiedUser, ApiError> {
+) -> ApiResult<VerifiedUser> {
     let mut owner = json!({ "kind": subject.owner_kind });
     if let Some(id) = &subject.owner_id {
         owner["id"] = json!(id);
@@ -187,7 +187,7 @@ pub(crate) async fn authorize_platform_audit(
     request: &Request,
     env: &Env,
     request_id: &str,
-) -> Result<(), ApiError> {
+) -> ApiResult<()> {
     let data = call_auth(
         request,
         env,
@@ -213,7 +213,7 @@ async fn call_auth(
     path: &str,
     body: Value,
     request_id: &str,
-) -> Result<Value, ApiError> {
+) -> ApiResult<Value> {
     let authorization = request
         .headers()
         .get("Authorization")

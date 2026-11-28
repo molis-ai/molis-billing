@@ -2,9 +2,9 @@ use serde_json::{Value, json};
 use worker::{D1Database, Env, Method, Request, Response, Result};
 
 use crate::core::{
-    http::{ApiError, ApiReply, json_response, read_json, request_id, valid_id},
+    http::{ApiError, ApiReply, ApiResult, json_response, read_json, request_id, valid_id},
     identity::{UserAccess, UserContext, authorize_user, require_internal_channel},
-    storage::{self, ApiResult},
+    storage,
 };
 use crate::{
     audit, catalog, credit,
@@ -12,21 +12,21 @@ use crate::{
 };
 
 pub(crate) struct RequestContext<'a> {
-    pub env: &'a Env,
-    pub request_id: &'a str,
-    pub now: i64,
+    pub(crate) env: &'a Env,
+    pub(crate) request_id: &'a str,
+    pub(crate) now: i64,
     #[cfg(feature = "test-fixture")]
-    pub test: crate::testing::Hooks,
+    pub(crate) test: crate::testing::Hooks,
 }
 
 impl RequestContext<'_> {
-    pub fn db(&self) -> ApiResult<D1Database> {
+    pub(crate) fn db(&self) -> ApiResult<D1Database> {
         self.env.d1("DB").map_err(|_| ApiError::BILLING_UNAVAILABLE)
     }
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum Route<'a> {
+pub(crate) enum Route<'a> {
     Health,
     Readiness,
     Catalog,
@@ -50,15 +50,18 @@ pub enum Route<'a> {
 }
 
 impl Route<'_> {
-    pub fn user_access(&self) -> Option<UserAccess> {
-        use Route::*;
+    fn user_access(&self) -> Option<UserAccess> {
         match self {
-            Catalog | Subscription | CreditBalance | CreditLedger | Entitlement => {
-                Some(UserAccess::Read)
+            Self::Catalog
+            | Self::Subscription
+            | Self::CreditBalance
+            | Self::CreditLedger
+            | Self::Entitlement => Some(UserAccess::Read),
+            Self::ListOrders | Self::GetOrder(_) | Self::CreateOrder | Self::Refund(_) => {
+                Some(UserAccess::Manage)
             }
-            ListOrders | GetOrder(_) | CreateOrder | Refund(_) => Some(UserAccess::Manage),
             #[cfg(feature = "mock-payment")]
-            MockPay(_) => Some(UserAccess::Manage),
+            Self::MockPay(_) => Some(UserAccess::Manage),
             _ => None,
         }
     }
@@ -118,44 +121,47 @@ enum UserBody {
     Json,
 }
 
-pub fn route(method: Method, path: &str) -> Route<'_> {
-    use Route::*;
+fn route(method: Method, path: &str) -> Route<'_> {
     let parts: Vec<_> = path.split('/').collect();
     match (method, parts.as_slice()) {
-        (Method::Get, ["", "api", "v1", "health"]) => Health,
-        (Method::Get, ["", "api", "v1", "readiness"]) => Readiness,
-        (Method::Get, ["", "api", "v1", "catalog", "plans"]) => Catalog,
-        (Method::Get, ["", "api", "v1", "subscriptions"]) => Subscription,
-        (Method::Get, ["", "api", "v1", "orders"]) => ListOrders,
-        (Method::Get, ["", "api", "v1", "orders", id]) if valid_id(id) => GetOrder(id),
-        (Method::Post, ["", "api", "v1", "orders"]) => CreateOrder,
+        (Method::Get, ["", "api", "v1", "health"]) => Route::Health,
+        (Method::Get, ["", "api", "v1", "readiness"]) => Route::Readiness,
+        (Method::Get, ["", "api", "v1", "catalog", "plans"]) => Route::Catalog,
+        (Method::Get, ["", "api", "v1", "subscriptions"]) => Route::Subscription,
+        (Method::Get, ["", "api", "v1", "orders"]) => Route::ListOrders,
+        (Method::Get, ["", "api", "v1", "orders", id]) if valid_id(id) => Route::GetOrder(id),
+        (Method::Post, ["", "api", "v1", "orders"]) => Route::CreateOrder,
         #[cfg(feature = "mock-payment")]
-        (Method::Post, ["", "api", "v1", "orders", id, "mock-pay"]) if valid_id(id) => MockPay(id),
-        (Method::Post, ["", "api", "v1", "orders", id, "refund"]) if valid_id(id) => Refund(id),
-        (Method::Get, ["", "api", "v1", "credits", "balance"]) => CreditBalance,
-        (Method::Get, ["", "api", "v1", "credits", "ledger"]) => CreditLedger,
-        (Method::Post, ["", "api", "v1", "entitlements", "check"]) => Entitlement,
-        (Method::Get, ["", "internal", "v1", "audit-events"]) => PlatformAudit,
-        (Method::Post, ["", "internal", "v1", "credits", "holds"]) => CreateHold,
+        (Method::Post, ["", "api", "v1", "orders", id, "mock-pay"]) if valid_id(id) => {
+            Route::MockPay(id)
+        }
+        (Method::Post, ["", "api", "v1", "orders", id, "refund"]) if valid_id(id) => {
+            Route::Refund(id)
+        }
+        (Method::Get, ["", "api", "v1", "credits", "balance"]) => Route::CreditBalance,
+        (Method::Get, ["", "api", "v1", "credits", "ledger"]) => Route::CreditLedger,
+        (Method::Post, ["", "api", "v1", "entitlements", "check"]) => Route::Entitlement,
+        (Method::Get, ["", "internal", "v1", "audit-events"]) => Route::PlatformAudit,
+        (Method::Post, ["", "internal", "v1", "credits", "holds"]) => Route::CreateHold,
         (Method::Post, ["", "internal", "v1", "credits", "holds", id, "settle"])
             if valid_id(id) =>
         {
-            SettleHold(id)
+            Route::SettleHold(id)
         }
         (Method::Post, ["", "internal", "v1", "credits", "holds", id, "release"])
             if valid_id(id) =>
         {
-            ReleaseHold(id)
+            Route::ReleaseHold(id)
         }
-        (Method::Post, ["", "internal", "v1", "credits", "consume"]) => Consume,
+        (Method::Post, ["", "internal", "v1", "credits", "consume"]) => Route::Consume,
         (Method::Post, ["", "api", "v1", "webhooks", provider]) if valid_id(provider) => {
-            Webhook(provider)
+            Route::Webhook(provider)
         }
-        _ => NotFound,
+        _ => Route::NotFound,
     }
 }
 
-pub async fn handle(request: Request, env: Env) -> Result<Response> {
+pub(crate) async fn handle(request: Request, env: Env) -> Result<Response> {
     let started = storage::now();
     let id = request_id(&request);
     let path = request.path();
@@ -196,17 +202,16 @@ async fn dispatch(
     validate_method(&request)?;
     #[cfg(feature = "test-fixture")]
     let test = crate::testing::Hooks::from_request(&request, env)?;
+    #[cfg(feature = "test-fixture")]
+    let now = test.now.unwrap_or(started);
+    #[cfg(not(feature = "test-fixture"))]
+    let now = started;
     let context = RequestContext {
         env,
         request_id: id,
-        now: started,
+        now,
         #[cfg(feature = "test-fixture")]
         test,
-    };
-    #[cfg(feature = "test-fixture")]
-    let context = RequestContext {
-        now: test.now.unwrap_or(context.now),
-        ..context
     };
     #[cfg(feature = "test-fixture")]
     if let Some(reply) = crate::testing::dispatch(_path, &request, &context).await {
