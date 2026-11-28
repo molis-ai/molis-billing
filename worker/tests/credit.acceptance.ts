@@ -57,7 +57,6 @@ async function testFixture(t: TestContext) {
     bindings: {
       MOLIS_ENVIRONMENT: 'test',
       MOLIS_INTERNAL_SECRET: secret,
-      BILLING_CREDIT_FIXTURE: '1',
     },
     auth,
   })
@@ -99,7 +98,7 @@ async function testFixture(t: TestContext) {
   ) => {
     const headers: Record<string, string> = {
       ...credentials,
-      'X-Fixture-Now': String(at),
+      'X-Test-Now': String(at),
       'X-Request-Id': key,
     }
     if (actor) headers.Authorization = 'Bearer ' + actor
@@ -443,6 +442,8 @@ test('A10 commits before archive, then handles partial release, timeouts and rac
     'settle-cross',
   )
   assert.equal(cross.status, 200, JSON.stringify(cross))
+  assert.equal(cross.data.hold.status, 'EXPIRED')
+  assert.equal(cross.data.hold.expired, 16)
   assert.deepEqual(
     await rows(
       "SELECT kind,delta_reserved FROM billing_credit_ledger WHERE kind IN ('SETTLE','EXPIRE') ORDER BY occurred_at",
@@ -488,11 +489,11 @@ test('A10 commits before archive, then handles partial release, timeouts and rac
   )
   assert.deepEqual(
     await rows(
-      "SELECT operation,count(*) AS n FROM billing_audit WHERE operation IN ('ORDER_EXPIRE','CREDIT_HOLD_TIMEOUT') GROUP BY operation ORDER BY operation",
+      "SELECT operation,count(*) AS n FROM billing_audit WHERE operation IN ('billing.order.expire','billing.credit.hold.timeout') GROUP BY operation ORDER BY operation",
     ),
     [
-      { operation: 'CREDIT_HOLD_TIMEOUT', n: 1 },
-      { operation: 'ORDER_EXPIRE', n: 1 },
+      { operation: 'billing.credit.hold.timeout', n: 1 },
+      { operation: 'billing.order.expire', n: 1 },
     ],
   )
   const consume = internal + '/consume'
@@ -523,6 +524,83 @@ test('scheduled Worker entrypoint processes due orders without the credit fixtur
     { status: 'EXPIRED' },
   ])
   assert.deepEqual(await rows("SELECT operation FROM billing_audit WHERE target_id='cron-order'"), [
-    { operation: 'ORDER_EXPIRE' },
+    { operation: 'billing.order.expire' },
   ])
+})
+
+test('internal credit rejects malformed bodies before changing the ledger', async (t) => {
+  const { caller, db } = await testFixture(t)
+  const baseBody = { ...usage('invalid', first), amount: 5, expiresAt: first + 10 }
+  for (const [path, mime, body] of [
+    ['/holds', 'text/plain', JSON.stringify(baseBody)],
+    ['/holds', 'application/json', JSON.stringify({ ...baseBody, unknown: true })],
+    ['/holds', 'application/json', JSON.stringify(baseBody) + ' '.repeat(16 * 1024)],
+    [
+      '/holds/absent/settle',
+      'application/json',
+      JSON.stringify({
+        ...usage('invalid', first),
+        segments: Array(17).fill({ occurredAt: first, amount: 1 }),
+      }),
+    ],
+    [
+      '/holds/absent/settle',
+      'application/json',
+      JSON.stringify({
+        ...usage('invalid', first),
+        segments: [{ occurredAt: first, amount: 1, unexpected: true }],
+      }),
+    ],
+  ]) {
+    const res = await caller.fetch(origin + internal + path, {
+      method: 'POST',
+      headers: {
+        ...credentials,
+        'Content-Type': mime,
+        'X-Test-Now': String(first),
+        'Idempotency-Key': 'invalid',
+      },
+      body,
+    })
+    assert.equal(res.status, 400)
+    assert.equal((await res.json()).error.code, 'INVALID_REQUEST')
+  }
+  assert.equal(await db.prepare('SELECT count(*) AS n FROM billing_credit_ledger').first('n'), 0)
+})
+
+test('cron continues after one subject fails and purges expired receipts', async (t) => {
+  const { buy, call, db, rows } = await testFixture(t)
+  await buy('bad', team)
+  await buy('good', teamOther)
+  const use = await call(
+    internal + '/consume',
+    first,
+    { ...usage('receipt', first), amount: 1 },
+    'purge-me',
+  )
+  assert.equal(use.status, 200)
+  await db
+    .prepare(
+      `CREATE TRIGGER fail_one BEFORE UPDATE ON billing_credit_period
+    WHEN OLD.owner_id='team-1' BEGIN SELECT RAISE(ABORT,'fixture failure'); END`,
+    )
+    .run()
+  assert.equal((await call(cleanup, next)).status, 200)
+  assert.deepEqual(
+    await rows(
+      'SELECT owner_id,status FROM billing_credit_period WHERE month_index=0 ORDER BY owner_id',
+    ),
+    [
+      { owner_id: team.id, status: 'ACTIVE' },
+      { owner_id: teamOther.id, status: 'EXPIRED' },
+    ],
+  )
+  assert.equal(
+    await db
+      .prepare(
+        "SELECT count(*) n FROM billing_idempotency_receipt WHERE idempotency_key='purge-me'",
+      )
+      .first('n'),
+    0,
+  )
 })

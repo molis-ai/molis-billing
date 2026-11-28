@@ -34,16 +34,16 @@ test('readiness probes the isolated D1 database', async () => {
   assert.deepEqual(await response.json(), { data: { status: 'READY', database: 'UP' } })
 })
 
-test('readiness fails on empty and 0002-only isolated D1', async (context) => {
+test('readiness requires the single baseline on isolated D1', async (context) => {
   const worker = startLocalRuntime()
   context.after(() => worker.dispose())
   const db = await worker.getD1Database('DB', 'billing')
-  for (const stages of [0, 2]) {
-    if (stages) await applySchema(db, 1, stages)
-    const response = await worker.dispatchFetch('http://billing.test/api/v1/readiness')
-    assert.equal(response.status, 503)
-    assert.equal((await response.json()).error.code, 'NOT_READY')
-  }
+  const probe = () => worker.dispatchFetch('http://billing.test/api/v1/readiness')
+  const empty = await probe()
+  assert.equal(empty.status, 503)
+  assert.equal((await empty.json()).error.code, 'NOT_READY')
+  await applySchema(db)
+  assert.equal((await probe()).status, 200)
 })
 
 test('a missing D1 binding fails readiness while the Worker stays healthy', async (context) => {

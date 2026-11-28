@@ -36,7 +36,7 @@ pub(super) enum Status {
 pub(super) struct Order {
     pub id: String,
     pub product: String,
-    pub owner_kind: crate::identity::OwnerKind,
+    pub owner_kind: crate::core::identity::OwnerKind,
     pub owner_id: String,
     pub actor_user_id: String,
     pub plan_id: String,
@@ -148,27 +148,25 @@ impl Order {
     }
 
     pub async fn find(db: &D1Database, subject: Subject<'_>, id: &str) -> ApiResult<Self> {
-        let mut values = subject.bind().to_vec();
-        values.push(id.into());
-        db_result(
+        db_result(Self::read(db, Some(subject), id)?.first(None).await)?.ok_or(ApiError::NOT_FOUND)
+    }
+
+    pub fn read(
+        db: &D1Database,
+        subject: Option<Subject<'_>>,
+        id: &str,
+    ) -> ApiResult<D1PreparedStatement> {
+        if let Some(subject) = subject {
+            let mut values = subject.bind().to_vec();
+            values.push(id.into());
             prepare(
                 db,
                 &format!("{READ_ORDER} WHERE {SCOPED} AND o.id=?"),
                 &values,
-            )?
-            .first(None)
-            .await,
-        )?
-        .ok_or(ApiError::NOT_FOUND)
-    }
-
-    pub async fn for_event(db: &D1Database, id: &str) -> ApiResult<Self> {
-        db_result(
-            prepare(db, &format!("{READ_ORDER} WHERE o.id=?"), &[id.into()])?
-                .first(None)
-                .await,
-        )?
-        .ok_or(ApiError::NOT_FOUND)
+            )
+        } else {
+            prepare(db, &format!("{READ_ORDER} WHERE o.id=?"), &[id.into()])
+        }
     }
 
     pub async fn list(db: &D1Database, subject: Subject<'_>, page: &Page) -> ApiResult<Vec<Self>> {
@@ -256,20 +254,50 @@ pub(super) struct Timeline {
 
 impl Timeline {
     pub async fn load(db: &D1Database, subject: Subject<'_>, now: i64) -> ApiResult<Self> {
-        let mut values = subject.bind().to_vec();
+        let rows = db_result(Self::read(db, &subject.bind(), now)?.all().await)?;
+        Self::from_rows(storage::rows(&rows)?, now)
+    }
+
+    pub fn read(db: &D1Database, scope: &[JsValue; 3], now: i64) -> ApiResult<D1PreparedStatement> {
+        Self::query(
+            db,
+            "p.product=? AND p.owner_kind=? AND p.owner_id=?",
+            scope,
+            now,
+        )
+    }
+
+    pub fn for_order(db: &D1Database, order_id: &str, now: i64) -> ApiResult<D1PreparedStatement> {
+        Self::query(
+            db,
+            "(p.product,p.owner_kind,p.owner_id) = (
+            SELECT product,owner_kind,owner_id FROM billing_order WHERE id=?)",
+            &[order_id.into()],
+            now,
+        )
+    }
+
+    fn query(
+        db: &D1Database,
+        scope: &str,
+        params: &[JsValue],
+        now: i64,
+    ) -> ApiResult<D1PreparedStatement> {
+        let mut values = params.to_vec();
         values.push(number(now)?);
-        let query = "SELECT p.order_id, p.subscription_id, p.month_offset, p.month_count, p.starts_at,
+        let query = format!("SELECT p.order_id, p.subscription_id, p.month_offset, p.month_count, p.starts_at,
                p.ends_at, s.anchor_at, s.billing_time_zone, o.plan_id, o.plan_version, v.name AS plan_name,
                o.interval, o.monthly_credits
             FROM billing_order_service_period p
             JOIN billing_subscription s ON s.id=p.subscription_id
             JOIN billing_order o ON o.id=p.order_id
             JOIN billing_plan_version v ON v.plan_id=o.plan_id AND v.plan_version=o.plan_version
-            WHERE p.product=? AND p.owner_kind=? AND p.owner_id=? AND p.ends_at>?
-              AND p.revoked_at IS NULL AND o.status='PAID'
-            ORDER BY p.starts_at LIMIT 3";
-        let mut rows: Vec<ServicePeriod> =
-            db_result(db_result(prepare(db, query, &values)?.all().await)?.results())?;
+            WHERE {scope} AND p.ends_at>? AND p.revoked_at IS NULL AND o.status='PAID'
+            ORDER BY p.starts_at LIMIT 3");
+        prepare(db, &query, &values)
+    }
+
+    pub fn from_rows(mut rows: Vec<ServicePeriod>, now: i64) -> ApiResult<Self> {
         let future = if rows.last().is_some_and(|p| p.starts_at > now) {
             rows.pop()
         } else {

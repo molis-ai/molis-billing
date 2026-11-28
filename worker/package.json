@@ -10,7 +10,7 @@
     "build:rust": "node scripts/rust-build.mjs",
     "check": "node scripts/rust-check.mjs check",
     "clippy": "node scripts/rust-check.mjs clippy",
-    "test": "node scripts/rust-check.mjs test && npm run build:rust -- --order-fixture --credit-fixture && node --test tests/*.test.ts tests/credit.acceptance.ts",
+    "test": "node scripts/rust-check.mjs test && npm run build:rust -- --test-fixture && node --test tests/*.test.ts tests/credit.acceptance.ts",
     "build": "wrangler deploy --dry-run --config wrangler.fixture.jsonc",
     "db:migrate": "wrangler d1 migrations apply molis-billing-local --local --config wrangler.fixture.jsonc --persist-to .wrangler/state && npm run db:seed:local",
     "db:seed:local": "wrangler d1 execute molis-billing-local --local --config wrangler.fixture.jsonc --persist-to .wrangler/state --file seeds/local-test-plans.sql",

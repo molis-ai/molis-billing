@@ -1,7 +1,9 @@
 const dayMs = 86_400_000
+const formatters = new Map()
 
 function formatter(zone) {
-  return new Intl.DateTimeFormat('en', {
+  if (formatters.has(zone)) return formatters.get(zone)
+  const format = new Intl.DateTimeFormat('en', {
     calendar: 'gregory',
     numberingSystem: 'latn',
     timeZone: zone,
@@ -14,6 +16,9 @@ function formatter(zone) {
     fractionalSecondDigits: 3,
     hourCycle: 'h23',
   })
+  if (formatters.size === 32) formatters.delete(formatters.keys().next().value)
+  formatters.set(zone, format)
+  return format
 }
 
 export function normalizeZone(zone) {
@@ -69,15 +74,6 @@ export function monthBoundary(anchorAt, zone, monthOffset) {
   const targetMonth = (monthIndex % 12) + 1
   const monthEnd = new Date(wallTime(targetYear, targetMonth + 1, 0)).getUTCDate()
   return instantAt(format, wallTime(targetYear, targetMonth, Math.min(day, monthEnd), ...clock))
-}
-
-export async function sha256(input) {
-  return new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input)))
-}
-
-export async function matchSecret(expected, provided) {
-  const [left, right] = await Promise.all([sha256(expected), sha256(provided)])
-  return crypto.subtle.timingSafeEqual(left, right)
 }
 
 export function requestId() {

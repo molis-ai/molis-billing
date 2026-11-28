@@ -9,12 +9,15 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["mock-payment"]
-mock-payment = []
-order-fixture = []
-credit-fixture = []
+mock-payment = ["dep:hmac"]
+test-fixture = []
 
 [dependencies]
+futures-util = {version="0.3", default-features=false}
 js-sys = "0.3"
+hmac = { version = "0.12", optional = true }
+sha2 = "0.10"
+subtle = "2"
 worker = { version = "=0.8.6", features = ["d1"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

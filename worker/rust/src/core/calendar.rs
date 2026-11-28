@@ -2,7 +2,7 @@
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
-use crate::http::ApiError;
+use crate::core::http::ApiError;
 
 const DEFAULT_ZONE: &str = "Asia/Shanghai";
 const DATE_MAX: i64 = 8_640_000_000_000_000;

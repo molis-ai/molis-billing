@@ -12,8 +12,14 @@ const commands = {
 }
 const action = process.argv[2]
 if (!Object.hasOwn(commands, action)) throw new Error('Unknown Rust action')
-execFileSync('cargo', commands[action], {
-  cwd: fileURLToPath(new URL('../rust/', import.meta.url)),
-  env: rustEnvironment(),
-  stdio: 'inherit',
-})
+const featureSets =
+  action === 'clippy' ? [[], ['--no-default-features'], ['--features', 'test-fixture']] : [[]]
+for (const features of featureSets) {
+  const args = [...commands[action]]
+  if (features.length) args.splice(args.indexOf('--'), 0, ...features)
+  execFileSync('cargo', args, {
+    cwd: fileURLToPath(new URL('../rust/', import.meta.url)),
+    env: rustEnvironment(),
+    stdio: 'inherit',
+  })
+}

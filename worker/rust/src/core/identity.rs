@@ -1,10 +1,11 @@
 //! Identity comes from a fresh server-to-server Auth assertion for the specific subject.
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use subtle::ConstantTimeEq;
 use wasm_bindgen::prelude::*;
 use worker::{Env, Request};
 
-use crate::http::{ApiError, valid_id};
+use crate::core::http::{ApiError, valid_id};
 
 const INTERNAL_HEADER: &str = "X-Molis-Internal-Secret";
 
@@ -18,9 +19,6 @@ extern "C" {
         body: &str,
         request_id: &str,
     ) -> Result<String, JsValue>;
-
-    #[wasm_bindgen(catch, js_name = matchSecret)]
-    async fn match_secret(expected: &str, provided: &str) -> Result<bool, JsValue>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -120,7 +118,7 @@ impl UserContext {
     }
 }
 
-pub async fn require_internal_channel(request: &Request, env: &Env) -> Result<(), ApiError> {
+pub fn require_internal_channel(request: &Request, env: &Env) -> Result<(), ApiError> {
     let secret = env
         .secret("MOLIS_INTERNAL_SECRET")
         .ok()
@@ -134,10 +132,7 @@ pub async fn require_internal_channel(request: &Request, env: &Env) -> Result<()
         .flatten()
         .filter(|value| valid_secret(value))
         .ok_or(ApiError::NOT_FOUND)?;
-    if !match_secret(&secret, &candidate)
-        .await
-        .map_err(|_| ApiError::BILLING_UNAVAILABLE)?
-    {
+    if !bool::from(secret.as_bytes().ct_eq(candidate.as_bytes())) {
         return Err(ApiError::NOT_FOUND);
     }
     Ok(())
@@ -188,26 +183,6 @@ pub async fn authorize_user(
     Ok(verified)
 }
 
-pub async fn introspect_session(
-    request: &Request,
-    env: &Env,
-    request_id: &str,
-) -> Result<String, ApiError> {
-    let data = call_auth(
-        request,
-        env,
-        "/internal/v1/sessions/introspect",
-        json!({}),
-        request_id,
-    )
-    .await?;
-    data["userId"]
-        .as_str()
-        .filter(|id| valid_id(id))
-        .map(str::to_owned)
-        .ok_or(ApiError::AUTH_UNAVAILABLE)
-}
-
 pub(crate) async fn authorize_platform_audit(
     request: &Request,
     env: &Env,
@@ -223,7 +198,7 @@ pub(crate) async fn authorize_platform_audit(
     .await
     .map_err(|failure| match failure {
         // A missing private authorization route is an unavailable dependency.
-        ApiError::NOT_FOUND => ApiError::AUTH_UNAVAILABLE,
+        failure if failure == ApiError::NOT_FOUND => ApiError::AUTH_UNAVAILABLE,
         failure => failure,
     })?;
     if !data["userId"].as_str().is_some_and(valid_id) || data["permission"] != "AUDIT_READ" {
