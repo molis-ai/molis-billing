@@ -9,7 +9,7 @@ use crate::{
         identity::{Owner, OwnerKind},
         storage::{self, CommitFailure, integer, prepare},
     },
-    maintenance::{CLEANUP_BATCH, log_failure},
+    maintenance::{BatchResult, CLEANUP_BATCH, MaintenanceLog},
 };
 
 use super::{
@@ -28,9 +28,9 @@ struct SubjectRow {
 pub(crate) async fn sync_due(
     db: &D1Database,
     now: i64,
-    request_id: &str,
+    log: &MaintenanceLog<'_>,
     deadline: i64,
-) -> ApiResult<()> {
+) -> ApiResult<BatchResult> {
     let subjects: Vec<SubjectRow> = prepare(
         db,
         include_str!("sql/cleanup_due.sql"),
@@ -41,6 +41,7 @@ pub(crate) async fn sync_due(
     .map_err(|_| ApiError::BILLING_UNAVAILABLE)?
     .results()
     .map_err(|_| ApiError::BILLING_UNAVAILABLE)?;
+    let mut result = BatchResult::default();
     for row in subjects {
         let owner = Owner {
             kind: row.owner_kind,
@@ -53,11 +54,15 @@ pub(crate) async fn sync_due(
         if storage::now() >= deadline {
             break;
         }
-        if let Err(error) = sync_until(db, &scope, now, request_id, deadline).await {
-            log_failure("credits.sync", &owner.id, &error);
+        match sync_until(db, &scope, now, log.request_id, deadline).await {
+            Ok(()) => result.processed += 1,
+            Err(error) => {
+                result.failed += 1;
+                log.failure("credits.sync", &error);
+            }
         }
     }
-    Ok(())
+    Ok(result)
 }
 
 #[derive(Deserialize)]

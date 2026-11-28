@@ -9,10 +9,20 @@ export const localPersistPath = fileURLToPath(new URL('../.wrangler/state/', imp
 const root = new URL('../../', import.meta.url)
 const path = (relative) => fileURLToPath(new URL(relative, root))
 
-export function billingEnvironment(name, dryRun) {
+export function billingEnvironment(
+  name,
+  dryRun,
+  properties = readProperties(new URL(`config/${name}.properties`, root)),
+) {
   const file = `config/${name}.properties`
-  const { databaseId, ...settings } = readProperties(new URL(file, root))
+  const { databaseId, grafanaLogsDestination, ...settings } = properties
   const { authWorkerName, ...target } = targets[name]
+  if (
+    grafanaLogsDestination !== undefined &&
+    (name === 'dev' || !/^[A-Za-z0-9_-]+$/u.test(grafanaLogsDestination))
+  ) {
+    throw new Error(`Invalid grafanaLogsDestination in ${file}.`)
+  }
   for (const [key, value] of Object.entries(target)) {
     if (settings[key] !== value)
       throw new Error(`Expected ${key} to match the platform target in ${file}.`)
@@ -33,6 +43,22 @@ export function billingEnvironment(name, dryRun) {
     compatibility_date: compatibilityDate,
     workers_dev: false,
     preview_urls: false,
+    ...(grafanaLogsDestination
+      ? {
+          observability: {
+            enabled: true,
+            redact_query_string: true,
+            logs: {
+              enabled: true,
+              invocation_logs: false,
+              head_sampling_rate: 1,
+              persist: false,
+              destinations: [grafanaLogsDestination],
+            },
+            traces: { enabled: false },
+          },
+        }
+      : {}),
     triggers: { crons: ['*/5 * * * *'] },
     ...(name === 'dev'
       ? {}

@@ -193,8 +193,8 @@ impl Receipt {
     }
 }
 
-pub(crate) async fn purge_expired(db: &D1Database, now: i64, limit: u32) -> ApiResult<()> {
-    prepare(
+pub(crate) async fn purge_expired(db: &D1Database, now: i64, limit: u32) -> ApiResult<usize> {
+    let result = prepare(
         db,
         "DELETE FROM billing_idempotency_receipt WHERE rowid IN (
             SELECT rowid FROM billing_idempotency_receipt WHERE expires_at<=?
@@ -205,5 +205,10 @@ pub(crate) async fn purge_expired(db: &D1Database, now: i64, limit: u32) -> ApiR
     .run()
     .await
     .map_err(|_| ApiError::BILLING_UNAVAILABLE)?;
-    Ok(())
+    if !result.success() {
+        return Err(ApiError::BILLING_UNAVAILABLE);
+    }
+    storage::db_result(result.meta())?
+        .and_then(|meta| meta.changes)
+        .ok_or(ApiError::BILLING_UNAVAILABLE)
 }

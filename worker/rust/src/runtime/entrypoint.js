@@ -8,19 +8,23 @@ function isPublic(path) {
   )
 }
 
-function notFound(request, env) {
-  const started = Date.now()
+function notFound(request, env, started) {
   const incomingId = request.headers.get('X-Request-Id') ?? ''
   const requestId = /^[A-Za-z0-9_.-]{1,128}$/u.test(incomingId) ? incomingId : crypto.randomUUID()
   console.log(
     JSON.stringify({
-      env: env.ENVIRONMENT_ID,
-      requestId,
+      schema: 1,
+      service: 'molis-billing',
+      env: ['prod', 'test', 'dev'].includes(env.MOLIS_ENVIRONMENT)
+        ? env.MOLIS_ENVIRONMENT
+        : 'unknown',
+      event: 'billing.http.request',
+      request_id: requestId,
       route: 'not_found',
       method: request.method,
       status: 404,
-      errorCode: 'NOT_FOUND',
-      durationMs: Date.now() - started,
+      error_code: 'NOT_FOUND',
+      duration_ms: Math.max(0, Date.now() - started),
     }),
   )
   return Response.json(
@@ -41,6 +45,7 @@ function notFound(request, env) {
 
 export default class extends BillingWorker {
   fetch(request) {
+    const started = Date.now()
     const env = this.env
     const url = new URL(request.url)
     const local =
@@ -49,9 +54,9 @@ export default class extends BillingWorker {
       url.origin === env.BILLING_ORIGIN
     if (isPublic(url.pathname)) {
       // Auth's browser proxy uses this server-only header in local development, too.
-      if (request.headers.has('X-Molis-Internal-Secret')) return notFound(request, this.env)
+      if (request.headers.has('X-Molis-Internal-Secret')) return notFound(request, env, started)
     } else if (!local) {
-      return notFound(request, this.env)
+      return notFound(request, env, started)
     }
     return super.fetch(request)
   }
@@ -59,7 +64,8 @@ export default class extends BillingWorker {
 
 export class BillingInternal extends BillingWorker {
   fetch(request) {
-    if (isPublic(new URL(request.url).pathname)) return notFound(request, this.env)
+    const started = Date.now()
+    if (isPublic(new URL(request.url).pathname)) return notFound(request, this.env, started)
     return super.fetch(request)
   }
 }
