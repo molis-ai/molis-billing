@@ -61,7 +61,7 @@ Billing 每页都向 Auth 复核会话和平台 `AUDIT_READ`。Auth 授权端须
 
 ## Billing 模块
 
-- `worker/rust/src/app.rs` 集中匹配公开探针、用户账务和内部账务路由，并在分发前校验相应通道。请求上下文统一传递请求 ID 和处理时间。`core/` 提供 HTTP、身份、D1、幂等、分页和日历实现。`orders/payments/` 管理支付和退款，`credit/` 管理额度，`maintenance.rs` 执行定时清理。
+- `worker/rust/src/app.rs` 集中匹配公开探针、用户账务和内部账务路由，并在分发前校验相应通道。请求上下文统一传递请求 ID 和处理时间。`core/` 提供 HTTP、身份、D1、幂等、分页和日历实现。`orders/payments/` 管理支付和退款，`credit/` 管理额度，`maintenance/` 执行定时清理。
 - `identity::authorize_user` 对目标调用 subjects/verify，并执行 `UserAccess::Read` / `Manage`。`VerifiedUser::ledger_actor_filter` 提供成员可见性过滤所需的 actor。在服务绑定缺失或密钥缺失时封闭失败。
 - `audit::handle` 在私有入口校验共享密钥，经 `identity::authorize_platform_audit` 检查平台权限后使用 `billing_audit_page` 索引读取分页。
 - `catalog::find_quote` 供订单节点查当前在售版本。创建订单在同一批次复核 current_version/sale_status，按该版本冻结 amount_minor、currency、monthly_credits、interval。支付后继续按已冻结版本履约。
