@@ -1,0 +1,573 @@
+{
+  "id": null,
+  "uid": "molis-auth-billing",
+  "title": "Molis Auth & Billing",
+  "tags": [
+    "molis",
+    "cloudflare",
+    "loki"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "1m",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "label": "Loki data source",
+        "type": "datasource",
+        "query": "loki",
+        "refresh": 1,
+        "hide": 0,
+        "multi": false,
+        "includeAll": false,
+        "current": {},
+        "options": []
+      },
+      {
+        "name": "env",
+        "label": "Environment",
+        "type": "custom",
+        "query": "prod,test",
+        "hide": 0,
+        "multi": false,
+        "includeAll": false,
+        "current": {
+          "text": "prod",
+          "value": "prod"
+        },
+        "options": [
+          {
+            "text": "prod",
+            "value": "prod",
+            "selected": true
+          },
+          {
+            "text": "test",
+            "value": "test",
+            "selected": false
+          }
+        ]
+      },
+      {
+        "name": "request_id",
+        "label": "Request ID",
+        "type": "textbox",
+        "query": "",
+        "current": {
+          "text": "",
+          "value": ""
+        },
+        "hide": 0,
+        "options": []
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Core API availability",
+      "description": "Per service in a rolling 5-minute window. 2xx and 3xx are successful, 5xx are failures. Windows with no eligible requests have no series.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "1 - ((\nsum by (app_service) (count_over_time(\n  {service_name=~\".+\"} |= \".http.request\"\n  | cloudflare_script_name=~\"molis-(auth|billing)-(production|test)\"\n  | json cf_message=\"message\"\n  | line_format `{{ .cf_message | default (__line__) }}`\n  | drop cf_message\n  | json app_service=\"service\", app_env=\"env\", app_event=\"event\", route=\"route\", status=\"status\"\n  | __error__=\"\" | app_service=~\"molis-auth|molis-billing\" | app_env=\"${env:raw}\"\n  | app_event=~\"auth[.]http[.]request|billing[.]http[.]request\"\n  | route=~\"/(api/(v1|account)|internal/v1)/.+\" | route!~\"/api/v1/(health|readiness)\"\n  | status=~\"5[0-9]{2}\" | keep app_service\n  [5m]\n))\nor (0 * sum by (app_service) (count_over_time(\n  {service_name=~\".+\"} |= \".http.request\"\n  | cloudflare_script_name=~\"molis-(auth|billing)-(production|test)\"\n  | json cf_message=\"message\"\n  | line_format `{{ .cf_message | default (__line__) }}`\n  | drop cf_message\n  | json app_service=\"service\", app_env=\"env\", app_event=\"event\", route=\"route\", status=\"status\"\n  | __error__=\"\" | app_service=~\"molis-auth|molis-billing\" | app_env=\"${env:raw}\"\n  | app_event=~\"auth[.]http[.]request|billing[.]http[.]request\"\n  | route=~\"/(api/(v1|account)|internal/v1)/.+\" | route!~\"/api/v1/(health|readiness)\"\n  | status=~\"[235][0-9]{2}\" | keep app_service\n  [5m]\n)))\n) / sum by (app_service) (count_over_time(\n  {service_name=~\".+\"} |= \".http.request\"\n  | cloudflare_script_name=~\"molis-(auth|billing)-(production|test)\"\n  | json cf_message=\"message\"\n  | line_format `{{ .cf_message | default (__line__) }}`\n  | drop cf_message\n  | json app_service=\"service\", app_env=\"env\", app_event=\"event\", route=\"route\", status=\"status\"\n  | __error__=\"\" | app_service=~\"molis-auth|molis-billing\" | app_env=\"${env:raw}\"\n  | app_event=~\"auth[.]http[.]request|billing[.]http[.]request\"\n  | route=~\"/(api/(v1|account)|internal/v1)/.+\" | route!~\"/api/v1/(health|readiness)\"\n  | status=~\"[235][0-9]{2}\" | keep app_service\n  [5m]\n)))",
+          "legendFormat": "{{app_service}}",
+          "queryType": "range"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Core API requests per second",
+      "description": "Per service in a rolling 5-minute window. Includes client and server errors. Health and readiness are excluded.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (app_service) (rate(\n  {service_name=~\".+\"} |= \".http.request\"\n  | cloudflare_script_name=~\"molis-(auth|billing)-(production|test)\"\n  | json cf_message=\"message\"\n  | line_format `{{ .cf_message | default (__line__) }}`\n  | drop cf_message\n  | json app_service=\"service\", app_env=\"env\", app_event=\"event\", route=\"route\"\n  | __error__=\"\" | app_service=~\"molis-auth|molis-billing\" | app_env=\"${env:raw}\"\n  | app_event=~\"auth[.]http[.]request|billing[.]http[.]request\"\n  | route=~\"/(api/(v1|account)|internal/v1)/.+\" | route!~\"/api/v1/(health|readiness)\"\n  | keep app_service\n  [5m]\n))",
+          "legendFormat": "{{app_service}}",
+          "queryType": "range"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Core API latency by route (P50)",
+      "description": "5-minute rolling median by service and route template. Includes unsuccessful requests.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 9
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "quantile_over_time(0.50,\n  {service_name=~\".+\"} |= \".http.request\"\n  | cloudflare_script_name=~\"molis-(auth|billing)-(production|test)\"\n  | json cf_message=\"message\"\n  | line_format `{{ .cf_message | default (__line__) }}`\n  | drop cf_message\n  | json app_service=\"service\", app_env=\"env\", app_event=\"event\", route=\"route\", duration_ms=\"duration_ms\"\n  | __error__=\"\" | app_service=~\"molis-auth|molis-billing\" | app_env=\"${env:raw}\"\n  | app_event=~\"auth[.]http[.]request|billing[.]http[.]request\"\n  | route=~\"/(api/(v1|account)|internal/v1)/.+\" | route!~\"/api/v1/(health|readiness)\"\n  | keep app_service, route, duration_ms\n  | unwrap duration_ms | __error__=\"\"\n  [5m]\n) by (app_service, route)",
+          "legendFormat": "{{app_service}} · {{route}}",
+          "queryType": "range"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Core API latency by route (P95)",
+      "description": "5-minute rolling P95 by service and route template. Includes unsuccessful requests.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 9
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "quantile_over_time(0.95,\n  {service_name=~\".+\"} |= \".http.request\"\n  | cloudflare_script_name=~\"molis-(auth|billing)-(production|test)\"\n  | json cf_message=\"message\"\n  | line_format `{{ .cf_message | default (__line__) }}`\n  | drop cf_message\n  | json app_service=\"service\", app_env=\"env\", app_event=\"event\", route=\"route\", duration_ms=\"duration_ms\"\n  | __error__=\"\" | app_service=~\"molis-auth|molis-billing\" | app_env=\"${env:raw}\"\n  | app_event=~\"auth[.]http[.]request|billing[.]http[.]request\"\n  | route=~\"/(api/(v1|account)|internal/v1)/.+\" | route!~\"/api/v1/(health|readiness)\"\n  | keep app_service, route, duration_ms\n  | unwrap duration_ms | __error__=\"\"\n  [5m]\n) by (app_service, route)",
+          "legendFormat": "{{app_service}} · {{route}}",
+          "queryType": "range"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Top 10 client errors (4xx)",
+      "description": "Request count by service, HTTP status, and error code over the selected time range.",
+      "type": "bargauge",
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 17,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "color": {
+            "mode": "fixed"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": false,
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "topk(10, sum by (app_service, status, error_code) (count_over_time(\n  {service_name=~\".+\"} |= \".http.request\"\n  | cloudflare_script_name=~\"molis-(auth|billing)-(production|test)\"\n  | json cf_message=\"message\"\n  | line_format `{{ .cf_message | default (__line__) }}`\n  | drop cf_message\n  | json app_service=\"service\", app_env=\"env\", app_event=\"event\", status=\"status\", error_code=\"error_code\"\n  | __error__=\"\" | app_service=~\"molis-auth|molis-billing\" | app_env=\"${env:raw}\"\n  | app_event=~\"auth[.]http[.]request|billing[.]http[.]request\"\n  | status=~\"4[0-9]{2}\" | keep app_service, status, error_code\n  [$__range]\n)))",
+          "legendFormat": "{{app_service}} · {{status}} · {{error_code}}",
+          "queryType": "instant"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Top 10 server errors (5xx)",
+      "description": "Request count by service, HTTP status, and error code over the selected time range.",
+      "type": "bargauge",
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 17,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "color": {
+            "mode": "fixed"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": false,
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "topk(10, sum by (app_service, status, error_code) (count_over_time(\n  {service_name=~\".+\"} |= \".http.request\"\n  | cloudflare_script_name=~\"molis-(auth|billing)-(production|test)\"\n  | json cf_message=\"message\"\n  | line_format `{{ .cf_message | default (__line__) }}`\n  | drop cf_message\n  | json app_service=\"service\", app_env=\"env\", app_event=\"event\", status=\"status\", error_code=\"error_code\"\n  | __error__=\"\" | app_service=~\"molis-auth|molis-billing\" | app_env=\"${env:raw}\"\n  | app_event=~\"auth[.]http[.]request|billing[.]http[.]request\"\n  | status=~\"5[0-9]{2}\" | keep app_service, status, error_code\n  [$__range]\n)))",
+          "legendFormat": "{{app_service}} · {{status}} · {{error_code}}",
+          "queryType": "instant"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Scheduled task duration",
+      "description": "Longest completed Auth cleanup or Billing maintenance run per service in the last 10 minutes.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 25,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "max_over_time(\n  {service_name=~\".+\"} |~ \"auth[.]cleanup|billing[.]maintenance\"\n  | cloudflare_script_name=~\"molis-(auth|billing)-(production|test)\"\n  | json cf_message=\"message\"\n  | line_format `{{ .cf_message | default (__line__) }}`\n  | drop cf_message\n  | json app_service=\"service\", app_env=\"env\", app_event=\"event\", duration_ms=\"duration_ms\"\n  | __error__=\"\" | app_service=~\"molis-auth|molis-billing\" | app_env=\"${env:raw}\"\n  | app_event=~\"auth[.]cleanup|billing[.]maintenance\"\n  | keep app_service, duration_ms\n  | unwrap duration_ms | __error__=\"\"\n  [10m]\n) by (app_service)",
+          "legendFormat": "{{app_service}}",
+          "queryType": "range"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Scheduled task failures",
+      "description": "Distinct failed runs in the last 15 minutes. Failure events from the same service and request ID count once.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 25,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "count by (app_service) (sum by (app_service, app_request_id) (count_over_time(\n  {service_name=~\".+\"} |= \".failure\"\n  | cloudflare_script_name=~\"molis-(auth|billing)-(production|test)\"\n  | json cf_message=\"message\"\n  | line_format `{{ .cf_message | default (__line__) }}`\n  | drop cf_message\n  | json app_service=\"service\", app_env=\"env\", app_event=\"event\", app_request_id=\"request_id\"\n  | __error__=\"\" | app_service=~\"molis-auth|molis-billing\" | app_env=\"${env:raw}\"\n  | app_event=~\"auth[.]cleanup[.]failure|billing[.]maintenance[.]failure\"\n  | app_request_id=~\".+\" | keep app_service, app_request_id\n  [15m]\n)))",
+          "legendFormat": "{{app_service}}",
+          "queryType": "range"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Scheduled task budget exhaustion",
+      "description": "Runs in the last 15 minutes. Auth reports time or round limits, Billing reports budget_exhausted.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 25,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (app_service) (count_over_time(\n  {service_name=~\".+\"} |~ \"auth[.]cleanup|billing[.]maintenance\"\n  | cloudflare_script_name=~\"molis-(auth|billing)-(production|test)\"\n  | json cf_message=\"message\"\n  | line_format `{{ .cf_message | default (__line__) }}`\n  | drop cf_message\n  | json app_service=\"service\", app_env=\"env\", app_event=\"event\", stop_reason=\"stop_reason\", budget_exhausted=\"budget_exhausted\"\n  | __error__=\"\" | app_service=~\"molis-auth|molis-billing\" | app_env=\"${env:raw}\"\n  | app_event=~\"auth[.]cleanup|billing[.]maintenance\"\n  | (app_event=\"auth.cleanup\" and stop_reason=~\"time_budget|round_limit\") or (app_event=\"billing.maintenance\" and budget_exhausted=\"true\")\n  | keep app_service\n  [15m]\n))",
+          "legendFormat": "{{app_service}}",
+          "queryType": "range"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "Request ID across Auth and Billing",
+      "description": "Enter the exact X-Request-Id above and choose the request time range to see matching application events in order.",
+      "type": "logs",
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 33,
+        "w": 24,
+        "h": 10
+      },
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "enableLogDetails": true,
+        "sortOrder": "Ascending",
+        "dedupStrategy": "none",
+        "prettifyLogMessage": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "{service_name=~\".+\"} |= ${request_id:json}\n| cloudflare_script_name=~\"molis-(auth|billing)-(production|test)\"\n| json cf_message=\"message\"\n| line_format `{{ .cf_message | default (__line__) }}`\n| drop cf_message\n| json app_service=\"service\", app_env=\"env\", app_event=\"event\", app_request_id=\"request_id\"\n| __error__=\"\" | app_service=~\"molis-auth|molis-billing\" | app_env=\"${env:raw}\"\n| app_request_id=~\".+\" | app_request_id=${request_id:json}",
+          "queryType": "range",
+          "maxLines": 200
+        }
+      ]
+    }
+  ]
+}

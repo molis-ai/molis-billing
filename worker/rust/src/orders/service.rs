@@ -12,7 +12,7 @@ use crate::{
     core::identity::VerifiedUser,
     core::pagination::Page,
     core::storage::{self, CommitFailure, db_result, integer, prepare},
-    maintenance::{CLEANUP_BATCH, log_failure},
+    maintenance::{BatchResult, CLEANUP_BATCH, MaintenanceLog},
 };
 
 use super::model::{Order, Subject, Timeline};
@@ -251,19 +251,26 @@ impl<'a> Orders<'a> {
 
     /// Persist expired orders in bounded batches. Reads enforce the deadline
     /// even if the scheduled caller hasn't swept the pending row yet.
-    pub(crate) async fn expire_pending(self, request_id: &str, deadline: i64) -> ApiResult<u32> {
+    pub(crate) async fn expire_pending(
+        self,
+        log: &MaintenanceLog<'_>,
+        deadline: i64,
+    ) -> ApiResult<BatchResult> {
         let rows = Order::pending_expired(self.db, self.now, CLEANUP_BATCH).await?;
-        let mut expired = 0;
+        let mut result = BatchResult::default();
         for order in rows {
             if storage::now() >= deadline {
                 break;
             }
-            match self.expire(&order, request_id, self.now).await {
-                Ok(changed) => expired += u32::from(changed),
-                Err(error) => log_failure("orders.expire", &order.id, &error),
+            match self.expire(&order, log.request_id, self.now).await {
+                Ok(changed) => result.processed += usize::from(changed),
+                Err(error) => {
+                    result.failed += 1;
+                    log.failure("orders.expire", &error);
+                }
             }
         }
-        Ok(expired)
+        Ok(result)
     }
 
     pub(super) async fn expire(self, order: &Order, request_id: &str, now: i64) -> ApiResult<bool> {

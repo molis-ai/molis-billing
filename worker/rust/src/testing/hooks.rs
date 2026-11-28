@@ -87,7 +87,8 @@ pub(crate) async fn dispatch(
         "/fixture/credits/cleanup" => {
             async {
                 require_internal_channel(request, ctx.env)?;
-                maintenance::run_at(&ctx.db()?, ctx.now, ctx.request_id).await;
+                let log = maintenance::MaintenanceLog::new(ctx.env, ctx.request_id);
+                maintenance::run_at(&ctx.db()?, ctx.now, &log).await;
                 Ok(ApiReply::ok(serde_json::json!({})))
             }
             .await
@@ -96,10 +97,13 @@ pub(crate) async fn dispatch(
             async {
                 require_internal_channel(request, ctx.env)?;
                 let db = ctx.db()?;
-                let count = Orders::for_maintenance(&db, ctx.now)
-                    .expire_pending(ctx.request_id, storage::now() + maintenance::BUDGET_MS)
+                let log = maintenance::MaintenanceLog::new(ctx.env, ctx.request_id);
+                let result = Orders::for_maintenance(&db, ctx.now)
+                    .expire_pending(&log, storage::now() + maintenance::BUDGET_MS)
                     .await?;
-                Ok(ApiReply::ok(serde_json::json!({"expired":count})))
+                Ok(ApiReply::ok(
+                    serde_json::json!({"expired":result.processed}),
+                ))
             }
             .await
         }

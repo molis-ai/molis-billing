@@ -29,7 +29,7 @@ Health reports the Worker identity and environment. Readiness checks that the bi
 | `test` | `https://billing.test.molis.ai` | `molis-billing-test` | `molis-billing-test` |
 | `prod` | `https://billing.molis.ai` | `molis-billing-production` | `molis-billing-prod` |
 
-`config/<env>.properties` holds non-secret settings and `config/platform-targets.json` records the environment targets. The test and production D1 IDs are placeholders. Dry runs use a fixture ID until each database is configured. Real deployment to either environment requires its own valid D1 ID.
+`config/<env>.properties` holds non-secret settings, including the separate D1 IDs for test and production. `config/platform-targets.json` records the environment targets. Apply the migrations in `worker/migrations/` to the corresponding D1 database before deploying a new environment.
 
 Store `MOLIS_INTERNAL_SECRET` in the ignored `secrets/<env>.properties` file, using the matching template from `secrets.example/`. Use the same 32-byte base64url secret in Auth and Billing for that environment. Dev connects to Auth on loopback. Test and prod connect to the matching `AuthInternal` Service Binding. Health and readiness work without the secret.
 

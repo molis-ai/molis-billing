@@ -12,6 +12,7 @@ export function startLocalRuntime({
   bindings = {},
   auth,
   triggerHandlers = false,
+  handleStructuredLogs,
 } = {}) {
   return new Miniflare(
     convertV4MiniflareOptions({
@@ -51,6 +52,7 @@ export function startLocalRuntime({
       ],
       d1Persist: false,
       unsafeTriggerHandlers: triggerHandlers,
+      handleStructuredLogs,
     }),
   )
 }

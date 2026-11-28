@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict'
 import { createServer } from 'node:net'
 import { test } from 'node:test'
+import { billingEnvironment } from '../worker/scripts/environment.mjs'
 import {
   assertPortAvailable,
   deploymentDatabaseId,
   localDatabaseId,
   parseProperties,
+  readProperties,
   selectEnvironment,
 } from './environment-properties.mjs'
 
@@ -49,6 +51,33 @@ test('only dry runs can substitute remote D1 placeholders', () => {
     assert.throws(() => deploymentDatabaseId(name, placeholder, false), /valid D1 databaseId/)
     assert.throws(() => deploymentDatabaseId(name, localDatabaseId, false), /valid D1 databaseId/)
   }
+})
+
+test('Grafana Logs export is opt-in remotely and forbidden in dev', () => {
+  const destination = 'molis-grafana-logs'
+  const prod = billingEnvironment('prod', true).platform
+  assert.deepEqual(prod.observability, {
+    enabled: true,
+    redact_query_string: true,
+    logs: {
+      enabled: true,
+      invocation_logs: false,
+      head_sampling_rate: 1,
+      persist: false,
+      destinations: [destination],
+    },
+    traces: { enabled: false },
+  })
+  assert.deepEqual(billingEnvironment('test', true).platform.observability, prod.observability)
+  assert.equal(billingEnvironment('dev', true).platform.observability, undefined)
+  const settings = (name) =>
+    readProperties(new URL(`../config/${name}.properties`, import.meta.url))
+  const withExport = (name, grafanaLogsDestination) =>
+    billingEnvironment(name, true, { ...settings(name), grafanaLogsDestination }).platform
+  assert.equal(withExport('test', undefined).observability, undefined)
+  assert.throws(() => withExport('dev', destination), /config\/dev.properties/)
+  assert.throws(() => withExport('test', ''), /config\/test.properties/)
+  assert.throws(() => withExport('prod', 'invalid/name'), /config\/prod.properties/)
 })
 
 test('local port check rejects an occupied port', async (context) => {

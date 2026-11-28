@@ -4,7 +4,7 @@ use worker::{D1Database, Env, Method, Request, Response, Result};
 use crate::core::{
     http::{ApiError, ApiReply, ApiResult, json_response, read_json, request_id, valid_id},
     identity::{UserAccess, UserContext, authorize_user, require_internal_channel},
-    storage,
+    logging, storage,
 };
 use crate::{
     audit, catalog, credit,
@@ -91,25 +91,24 @@ impl Route<'_> {
 
     fn label(&self) -> &'static str {
         match self {
-            Self::Health => "health",
-            Self::Readiness => "readiness",
-            Self::Catalog => "catalog",
-            Self::Subscription => "subscription",
-            Self::ListOrders => "orders.list",
-            Self::GetOrder(_) => "orders.get",
-            Self::CreateOrder => "orders.create",
+            Self::Health => "/api/v1/health",
+            Self::Readiness => "/api/v1/readiness",
+            Self::Catalog => "/api/v1/catalog/plans",
+            Self::Subscription => "/api/v1/subscriptions",
+            Self::ListOrders | Self::CreateOrder => "/api/v1/orders",
+            Self::GetOrder(_) => "/api/v1/orders/{id}",
             #[cfg(feature = "mock-payment")]
-            Self::MockPay(_) => "orders.mock_pay",
-            Self::Refund(_) => "orders.refund",
-            Self::CreditBalance => "credits.balance",
-            Self::CreditLedger => "credits.ledger",
-            Self::Entitlement => "entitlements.check",
-            Self::PlatformAudit => "audit.list",
-            Self::CreateHold => "credits.hold",
-            Self::SettleHold(_) => "credits.settle",
-            Self::ReleaseHold(_) => "credits.release",
-            Self::Consume => "credits.consume",
-            Self::Webhook(_) => "webhooks",
+            Self::MockPay(_) => "/api/v1/orders/{id}/mock-pay",
+            Self::Refund(_) => "/api/v1/orders/{id}/refund",
+            Self::CreditBalance => "/api/v1/credits/balance",
+            Self::CreditLedger => "/api/v1/credits/ledger",
+            Self::Entitlement => "/api/v1/entitlements/check",
+            Self::PlatformAudit => "/internal/v1/audit-events",
+            Self::CreateHold => "/internal/v1/credits/holds",
+            Self::SettleHold(_) => "/internal/v1/credits/holds/{id}/settle",
+            Self::ReleaseHold(_) => "/internal/v1/credits/holds/{id}/release",
+            Self::Consume => "/internal/v1/credits/consume",
+            Self::Webhook(_) => "/api/v1/webhooks/{provider}",
             Self::NotFound => "not_found",
         }
     }
@@ -167,27 +166,31 @@ pub(crate) async fn handle(request: Request, env: Env) -> Result<Response> {
     let path = request.path();
     let method = request.inner().method();
     let route = route(request.method(), &path);
-    let environment = env
-        .var("ENVIRONMENT_ID")
-        .ok()
-        .map(|value| value.to_string());
     let result = dispatch(&route, &path, request, &env, &id, started).await;
     let (status, error_code, body) = match result {
         Ok(reply) => (reply.status, None, reply.body),
         Err(error) => (error.status, Some(error.code), error.body(&id)),
     };
-    worker::console_log!(
-        "{}",
-        json!({
-            "env": environment,
-            "requestId": id,
-            "route": route.label(),
-            "method": method,
-            "status": status,
-            "errorCode": error_code,
-            "durationMs": (storage::now() - started).max(0),
-        })
-    );
+    if route != Route::Health || !(200..400).contains(&status) {
+        let code = if (200..400).contains(&status) {
+            "none"
+        } else {
+            error_code.unwrap_or("http_error")
+        };
+        logging::event(
+            "billing.http.request",
+            logging::environment(&env),
+            &id,
+            [
+                ("method", json!(method)),
+                ("route", json!(route.label())),
+                ("status", json!(status)),
+                ("error_code", json!(code)),
+                ("duration_ms", json!((storage::now() - started).max(0))),
+            ],
+            status >= 500,
+        );
+    }
     json_response(status, &body, &id)
 }
 
